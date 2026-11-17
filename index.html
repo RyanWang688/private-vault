@@ -2,113 +2,338 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex, nofollow, noarchive">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow, noarchive, nosnippet, noimageindex">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; form-action 'none'; base-uri 'none'">
 <title>私人保险箱</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<main id="app">
+<div id="bg" aria-hidden="true"></div>
 
-  <!-- 创建 -->
-  <section id="view-setup" class="card narrow" hidden>
-    <h1>创建保险箱</h1>
-    <p class="muted">设置一个主密码。所有数据都会用它在你的浏览器里加密，<b>主密码不会被保存在任何地方，忘记后无法找回</b>。</p>
-    <form id="form-setup">
-      <label>主密码（至少 12 位）<input type="password" id="setup-pw" autocomplete="new-password" minlength="12" required></label>
-      <label>再输入一次<input type="password" id="setup-pw2" autocomplete="new-password" minlength="12" required></label>
-      <button type="submit" class="primary">创建</button>
-      <p class="error" id="setup-err"></p>
+<!-- ================= 解锁 / 创建 ================= -->
+<section id="screen-auth" class="auth" hidden>
+  <div class="auth-card">
+    <div class="vault-art" id="vault-art" aria-hidden="true">
+      <svg class="vault-inside" viewBox="0 0 200 200">
+        <defs>
+          <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" class="glow-a"/>
+            <stop offset="100%" class="glow-b"/>
+          </radialGradient>
+        </defs>
+        <circle cx="100" cy="100" r="80" class="v-hole"/>
+        <circle cx="100" cy="100" r="74" fill="url(#glow)"/>
+        <rect x="62" y="72" width="34" height="24" rx="4" class="v-item a"/>
+        <rect x="104" y="64" width="30" height="38" rx="3" class="v-item b"/>
+        <circle cx="86" cy="124" r="9" class="v-item c"/>
+        <rect x="93" y="121" width="30" height="6" rx="3" class="v-item c"/>
+      </svg>
+      <svg class="door" viewBox="0 0 200 200">
+        <circle cx="100" cy="100" r="88" class="v-frame"/>
+        <circle cx="100" cy="100" r="76" class="v-door"/>
+        <circle cx="100" cy="100" r="62" class="v-ring"/>
+        <g class="v-bolts">
+          <circle cx="182" cy="100" r="3.5"/><circle cx="158" cy="158" r="3.5"/><circle cx="100" cy="182" r="3.5"/>
+          <circle cx="42" cy="158" r="3.5"/><circle cx="18" cy="100" r="3.5"/><circle cx="42" cy="42" r="3.5"/>
+          <circle cx="100" cy="18" r="3.5"/><circle cx="158" cy="42" r="3.5"/>
+        </g>
+        <rect x="6" y="70" width="10" height="18" rx="3" class="v-hinge"/>
+        <rect x="6" y="112" width="10" height="18" rx="3" class="v-hinge"/>
+        <g class="dial">
+          <line x1="100" y1="100" x2="100" y2="58" class="v-spoke"/>
+          <line x1="100" y1="100" x2="136.4" y2="121" class="v-spoke"/>
+          <line x1="100" y1="100" x2="63.6" y2="121" class="v-spoke"/>
+          <circle cx="100" cy="58" r="7" class="v-knob"/>
+          <circle cx="136.4" cy="121" r="7" class="v-knob"/>
+          <circle cx="63.6" cy="121" r="7" class="v-knob"/>
+          <circle cx="100" cy="100" r="16" class="v-hub"/>
+          <circle cx="100" cy="100" r="5" class="v-hub-dot"/>
+        </g>
+      </svg>
+    </div>
+
+    <!-- 创建 -->
+    <form id="form-setup" class="auth-form" hidden autocomplete="off">
+      <h1>创建你的保险箱</h1>
+      <p class="lead">所有内容都在这台设备上用 AES-256 加密。主密码只有你知道，不会被保存，也无法找回。</p>
+      <label class="field">
+        <span>主密码</span>
+        <input type="password" id="setup-pw" autocomplete="new-password" required>
+      </label>
+      <div class="meter" id="setup-meter"><i></i></div>
+      <p class="hint" id="setup-meter-text">建议用一句只有你知道的话，16 位以上</p>
+      <label class="field">
+        <span>再输入一次</span>
+        <input type="password" id="setup-pw2" autocomplete="new-password" required>
+      </label>
+      <button class="btn primary block" type="submit" id="setup-btn">创建保险箱</button>
+      <p class="error" id="setup-err" role="alert"></p>
+      <div class="auth-alt">
+        <span>已经有加密文件？</span>
+        <label class="link">导入 vault.json<input type="file" id="setup-import" accept=".json,application/json" hidden></label>
+      </div>
     </form>
-    <hr>
-    <p class="muted">已有加密文件？</p>
-    <label class="btn">导入 vault.json<input type="file" id="setup-import" accept=".json,application/json" hidden></label>
-  </section>
 
-  <!-- 解锁 -->
-  <section id="view-lock" class="card narrow" hidden>
-    <h1>🔒 已锁定</h1>
-    <p class="muted" id="lock-source"></p>
-    <form id="form-unlock">
-      <label>主密码<input type="password" id="unlock-pw" autocomplete="current-password" required autofocus></label>
-      <button type="submit" class="primary" id="unlock-btn">解锁</button>
-      <p class="error" id="unlock-err"></p>
+    <!-- 解锁 -->
+    <form id="form-unlock" class="auth-form" hidden autocomplete="off">
+      <h1>欢迎回来</h1>
+      <p class="lead" id="unlock-lead">输入主密码打开保险箱</p>
+      <label class="field">
+        <span>主密码</span>
+        <input type="password" id="unlock-pw" autocomplete="current-password" required>
+      </label>
+      <div id="secret-wrap" hidden>
+        <label class="field">
+          <span>秘密钥匙（在应急包里，以 PV1- 开头）</span>
+          <input type="text" id="unlock-secret" autocomplete="off" spellcheck="false" placeholder="PV1-XXXX-XXXX-…">
+        </label>
+        <label class="check"><input type="checkbox" id="unlock-remember" checked> 在这台设备上记住秘密钥匙</label>
+      </div>
+      <button class="btn primary block" type="submit" id="unlock-btn">解锁</button>
+      <p class="error" id="unlock-err" role="alert"></p>
+      <p class="hint" id="unlock-meta"></p>
     </form>
-  </section>
+  </div>
+</section>
 
-  <!-- 主界面 -->
-  <section id="view-main" hidden>
+<!-- ================= 主界面 ================= -->
+<section id="screen-app" hidden>
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.2"/><path d="M12 3v5.8M12 15.2V21M3 12h5.8M15.2 12H21"/></svg></span>
+      <span>私人保险箱</span>
+    </div>
+    <nav class="nav" id="nav-types" aria-label="分类"></nav>
+    <div class="nav-section" id="tags-section">
+      <div class="nav-title">标签</div>
+      <nav class="nav tags" id="nav-tags" aria-label="标签"></nav>
+    </div>
+    <div class="storage" id="storage">
+      <div class="storage-row"><span>可同步容量</span><span id="storage-text"></span></div>
+      <div class="meter small"><i id="storage-bar"></i></div>
+    </div>
+  </aside>
+
+  <div class="main">
     <header class="topbar">
-      <h1>私人保险箱</h1>
-      <div class="actions">
-        <span id="dirty" class="badge" hidden>有未同步到 GitHub 的更改</span>
-        <button id="btn-export">导出加密文件</button>
-        <button id="btn-settings">设置</button>
-        <button id="btn-lock" class="primary">锁定</button>
+      <div class="search">
+        <span class="ic" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg></span>
+        <input type="search" id="search" placeholder="搜索标题、账号、标签、文件名…  # 按标签" autocomplete="off" spellcheck="false">
+        <kbd>Ctrl K</kbd>
+      </div>
+      <div class="seg" role="tablist" aria-label="视图">
+        <button role="tab" data-view="cards" class="on" title="卡片"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="2"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="2"/></svg><span>卡片</span></button>
+        <button role="tab" data-view="graph" title="图谱"><svg viewBox="0 0 24 24"><circle cx="6" cy="7" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="17" r="2.5"/><circle cx="19" cy="16" r="1.6"/><path d="M8.2 8.3l2.6 6.4M15.6 6.6L8.5 7M13.6 15.5l3-7.2M14.5 17l2.9-.6"/></svg><span>图谱</span></button>
+      </div>
+      <div class="top-actions">
+        <button class="sync-pill" id="sync-pill" hidden title="有未上传到 GitHub 的更改，点击导出">
+          <i></i><span>未同步</span>
+        </button>
+        <button class="icon-btn" id="btn-theme" title="切换深浅色"><svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg></button>
+        <button class="icon-btn" id="btn-settings" title="设置"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
+        <button class="icon-btn" id="btn-lock" title="锁定"><svg viewBox="0 0 24 24"><rect x="4.5" y="10.5" width="15" height="10" rx="2.5"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></svg></button>
+        <div class="add-wrap">
+          <button class="btn primary" id="btn-add"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>新建</span></button>
+          <div class="menu" id="add-menu" hidden></div>
+        </div>
       </div>
     </header>
 
-    <nav class="tabs">
-      <button data-tab="accounts" class="active">账号密码</button>
-      <button data-tab="notes">个人信息</button>
-      <button data-tab="files">文件</button>
-    </nav>
-
-    <input type="search" id="search" placeholder="搜索…">
-
-    <div id="tab-accounts" class="tab">
-      <button class="primary add" id="add-account">+ 新增账号</button>
-      <ul id="list-accounts" class="list"></ul>
+    <div class="view" id="view-cards">
+      <div class="view-head">
+        <h2 id="view-title">全部</h2>
+        <span class="count" id="view-count"></span>
+        <span class="spacer"></span>
+        <select id="sort" aria-label="排序">
+          <option value="updated">最近更新</option>
+          <option value="title">按名称</option>
+          <option value="type">按分类</option>
+        </select>
+      </div>
+      <div class="grid" id="grid"></div>
+      <div class="empty" id="empty" hidden></div>
     </div>
-    <div id="tab-notes" class="tab" hidden>
-      <button class="primary add" id="add-note">+ 新增信息</button>
-      <ul id="list-notes" class="list"></ul>
-    </div>
-    <div id="tab-files" class="tab" hidden>
-      <label class="btn primary add">+ 上传文件<input type="file" id="add-file" multiple hidden></label>
-      <p class="muted small">文件会加密后存入保险箱。单个文件建议小于 20MB（GitHub 单文件上限 100MB）。</p>
-      <ul id="list-files" class="list"></ul>
-    </div>
-  </section>
-</main>
 
-<!-- 编辑对话框 -->
-<dialog id="dlg-edit">
-  <form id="form-edit" method="dialog">
-    <h2 id="edit-title"></h2>
-    <div id="edit-fields"></div>
+    <div class="view graph-view" id="view-graph" hidden>
+      <canvas id="graph"></canvas>
+      <div class="graph-legend" id="graph-legend"></div>
+      <div class="graph-tools">
+        <button class="icon-btn" id="g-zoom-in" title="放大"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+        <button class="icon-btn" id="g-zoom-out" title="缩小"><svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>
+        <button class="icon-btn" id="g-fit" title="适应窗口"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+        <label class="check small"><input type="checkbox" id="g-tags" checked> 标签节点</label>
+      </div>
+      <p class="graph-hint">滚轮缩放 · 拖动画布平移 · 拖动节点整理 · 点击打开 · 双击空白处适应窗口</p>
+      <div class="empty floating" id="graph-empty" hidden></div>
+    </div>
+  </div>
+
+  <div id="scrim"></div>
+  <aside class="drawer" id="drawer" aria-hidden="true"></aside>
+</section>
+
+<!-- 拖入文件 -->
+<div id="dropzone" aria-hidden="true">
+  <div class="drop-card">
+    <svg class="il" viewBox="0 0 200 150">
+      <ellipse class="b" cx="100" cy="88" rx="78" ry="52"/>
+      <g class="float">
+        <rect class="p" x="78" y="20" width="44" height="54" rx="5"/>
+        <path class="s" d="M88 36h24M88 46h24M88 56h14"/>
+      </g>
+      <path class="ia" d="M100 78v30m-11-11 11 11 11-11"/>
+      <path class="p" d="M40 104h34l8 12h36l8-12h34v22a8 8 0 0 1-8 8H48a8 8 0 0 1-8-8z"/>
+    </svg>
+    <h3>松手即可加密保存</h3>
+    <p>文件只在你的浏览器里加密，原文件不会上传到任何地方</p>
+  </div>
+</div>
+
+<!-- 应急包 -->
+<dialog id="dlg-kit" class="dlg">
+  <form method="dialog" class="dlg-body">
+    <svg class="il kit-il" viewBox="0 0 200 150" aria-hidden="true">
+      <ellipse class="b" cx="100" cy="80" rx="76" ry="58"/>
+      <path class="a" d="M100 22l44 16v32c0 28-19 46-44 56-25-10-44-28-44-56V38z"/>
+      <circle class="p" cx="100" cy="68" r="13"/>
+      <path class="p" d="M95 79h10l3 30h-16z"/>
+      <circle class="a2" cx="100" cy="68" r="4"/>
+    </svg>
+    <h2>保存你的应急包</h2>
+    <p class="lead">换设备或清除浏览器数据后，需要用<b>秘密钥匙 + 主密码</b>才能打开。只有它们俩加在一起，才能解开 GitHub 上的加密文件，所以别人拿到文件也没法暴力破解。</p>
+    <div class="secret-box" id="kit-secret"></div>
+    <div class="row">
+      <button type="button" class="btn" id="kit-copy">复制</button>
+      <button type="button" class="btn" id="kit-download">下载应急包</button>
+    </div>
+    <ul class="tips">
+      <li>把它存在密码管理器、打印出来，或者抄在纸上</li>
+      <li><b>不要</b>把它上传到 GitHub，也不要和主密码放在一起</li>
+    </ul>
+    <label class="check" id="kit-ack-wrap"><input type="checkbox" id="kit-ack"> 我已经把秘密钥匙保存在安全的地方</label>
     <div class="row end">
-      <button type="button" id="edit-delete" class="danger">删除</button>
-      <span class="spacer"></span>
-      <button type="button" id="edit-cancel">取消</button>
-      <button type="submit" class="primary">保存</button>
+      <button type="submit" class="btn primary" id="kit-done">继续</button>
     </div>
   </form>
 </dialog>
 
 <!-- 设置 -->
-<dialog id="dlg-settings">
-  <form id="form-settings" method="dialog">
-    <h2>设置</h2>
-    <h3>修改主密码</h3>
-    <label>当前主密码<input type="password" id="set-old" autocomplete="current-password"></label>
-    <label>新主密码（至少 12 位）<input type="password" id="set-new" autocomplete="new-password"></label>
-    <label>再输入一次<input type="password" id="set-new2" autocomplete="new-password"></label>
-    <button type="button" id="set-change" class="primary">修改</button>
-    <p class="error" id="set-err"></p>
-    <h3>同步</h3>
-    <p class="muted small">本设备的数据保存在浏览器里。要在其他设备上看到最新内容：点“导出加密文件”，把下载的 <code>vault.json</code> 替换到 GitHub 仓库里并提交。</p>
-    <label class="btn">从文件导入（覆盖本设备）<input type="file" id="set-import" accept=".json,application/json" hidden></label>
-    <button type="button" id="set-reload">重新加载 GitHub 上的版本（丢弃本设备更改）</button>
-    <h3>自动锁定</h3>
-    <p class="muted small">无操作 5 分钟后自动锁定。</p>
-    <div class="row end"><button type="button" id="set-close">关闭</button></div>
+<dialog id="dlg-settings" class="dlg">
+  <form method="dialog" class="dlg-body" autocomplete="off">
+    <div class="dlg-head"><h2>设置</h2><button class="icon-btn" value="close" title="关闭"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+
+    <h3>安全</h3>
+    <label class="field"><span>自动锁定</span>
+      <select id="set-autolock">
+        <option value="1">无操作 1 分钟</option>
+        <option value="5">无操作 5 分钟</option>
+        <option value="15">无操作 15 分钟</option>
+      </select>
+    </label>
+    <label class="field"><span>当前主密码（用于下面的操作）</span><input type="password" id="set-old" autocomplete="current-password"></label>
+    <div class="row wrap">
+      <button type="button" class="btn" id="set-showkit">查看应急包</button>
+      <button type="button" class="btn danger" id="set-forget">在本设备忘记秘密钥匙</button>
+    </div>
+    <details class="sub">
+      <summary>修改主密码</summary>
+      <label class="field"><span>新主密码</span><input type="password" id="set-new" autocomplete="new-password"></label>
+      <div class="meter" id="set-meter"><i></i></div>
+      <label class="field"><span>再输入一次</span><input type="password" id="set-new2" autocomplete="new-password"></label>
+      <label class="check"><input type="checkbox" id="set-rotate"> 同时更换秘密钥匙（会生成新的应急包）</label>
+      <button type="button" class="btn primary" id="set-change">修改</button>
+    </details>
+    <p class="error" id="set-err" role="alert"></p>
+
+    <h3>同步到 GitHub</h3>
+    <p class="hint">修改保存在本设备浏览器里（已加密）。点“导出”下载 <code>vault.json</code>，替换仓库里的同名文件并提交，其他设备就能看到最新内容。</p>
+    <div class="row wrap">
+      <button type="button" class="btn primary" id="set-export">导出 vault.json</button>
+      <label class="btn">从文件导入<input type="file" id="set-import" accept=".json,application/json" hidden></label>
+      <button type="button" class="btn" id="set-reload">改用 GitHub 上的版本</button>
+    </div>
   </form>
 </dialog>
 
-<div id="toast" hidden></div>
+<!-- 确认 -->
+<dialog id="dlg-confirm" class="dlg small">
+  <form method="dialog" class="dlg-body">
+    <h2 id="confirm-title"></h2>
+    <p class="lead" id="confirm-text"></p>
+    <div class="row end">
+      <button value="no" class="btn">取消</button>
+      <button value="yes" class="btn danger-fill" id="confirm-yes">确定</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toasts" aria-live="polite"></div>
+<input type="file" id="file-input" multiple hidden>
+<datalist id="dl-tags"></datalist>
+<datalist id="dl-items"></datalist>
+
+<!-- 空状态插图 -->
+<template id="il-all">
+  <svg class="il" viewBox="0 0 200 150"><ellipse class="b" cx="100" cy="84" rx="80" ry="54"/>
+    <path class="p" d="M48 70h104v52a8 8 0 0 1-8 8H56a8 8 0 0 1-8-8z"/>
+    <path class="p" d="M48 70l-12-18h104l12 18"/><path class="p" d="M152 70l14-16H60"/>
+    <g class="float"><rect class="t" x="70" y="34" width="26" height="18" rx="3"/><rect class="a2" x="104" y="26" width="22" height="30" rx="3"/></g>
+    <path class="ia" d="M160 26l3 7 7 3-7 3-3 7-3-7-7-3 7-3zM40 36l2 4 4 2-4 2-2 4-2-4-4-2 4-2z"/>
+    <path class="s" d="M82 96h36"/></svg>
+</template>
+<template id="il-login">
+  <svg class="il" viewBox="0 0 200 150"><ellipse class="b" cx="100" cy="82" rx="78" ry="54"/>
+    <circle class="s" cx="76" cy="46" r="16"/>
+    <g class="float"><circle class="p" cx="72" cy="86" r="16"/><circle class="b" cx="72" cy="86" r="6"/>
+    <path class="p" d="M88 80h52v12h-8v9h-9v-9h-35z"/></g>
+    <g class="float delay"><circle class="t" cx="104" cy="56" r="13"/><circle class="b" cx="104" cy="56" r="4.5"/>
+    <path class="t" d="M115 63l30 22-5 7-6-4-4 6-6-4 4-6-17-12z"/></g></svg>
+</template>
+<template id="il-identity">
+  <svg class="il" viewBox="0 0 200 150"><ellipse class="b" cx="100" cy="82" rx="78" ry="54"/>
+    <g class="float"><rect class="p" x="44" y="36" width="112" height="76" rx="10"/>
+    <circle class="t" cx="78" cy="68" r="12"/><path class="t" d="M58 98c3-11 11-15 20-15s17 4 20 15z"/>
+    <path class="s" d="M108 62h34M108 74h26M108 86h30"/><rect class="a2" x="120" y="44" width="22" height="8" rx="4"/></g></svg>
+</template>
+<template id="il-bank">
+  <svg class="il" viewBox="0 0 200 150"><ellipse class="b" cx="100" cy="82" rx="78" ry="54"/>
+    <g transform="rotate(-10 100 70)"><rect class="a2" x="54" y="30" width="104" height="64" rx="10"/></g>
+    <g class="float"><rect class="t" x="44" y="50" width="108" height="66" rx="10"/>
+    <rect class="p" x="58" y="68" width="20" height="15" rx="3"/><path class="s light" d="M58 100h14M80 100h14M102 100h14"/>
+    <circle class="p" cx="128" cy="68" r="7"/><circle class="b" cx="138" cy="68" r="7"/></g></svg>
+</template>
+<template id="il-note">
+  <svg class="il" viewBox="0 0 200 150"><ellipse class="b" cx="100" cy="82" rx="78" ry="54"/>
+    <g class="float"><rect class="p" x="56" y="28" width="82" height="100" rx="8"/>
+    <path class="s" d="M70 52h54M70 66h54M70 80h40M70 94h48"/>
+    <path class="s" d="M56 44h-6M56 64h-6M56 84h-6M56 104h-6"/></g>
+    <g class="float delay" transform="rotate(35 140 90)"><rect class="t" x="134" y="50" width="12" height="62" rx="3"/><path class="a2" d="M134 112h12l-6 12z"/></g></svg>
+</template>
+<template id="il-file">
+  <svg class="il" viewBox="0 0 200 150"><ellipse class="b" cx="100" cy="84" rx="78" ry="54"/>
+    <path class="a2" d="M42 46a6 6 0 0 1 6-6h30l10 10h64a6 6 0 0 1 6 6v58H42z"/>
+    <g class="float"><rect class="p" x="62" y="28" width="58" height="70" rx="5" transform="rotate(-8 90 60)"/><rect class="p" x="84" y="32" width="58" height="70" rx="5"/>
+    <path class="s" d="M94 50h38M94 62h38M94 74h24"/></g>
+    <path class="t" d="M36 72a6 6 0 0 1 6-6h116a6 6 0 0 1 6 7l-6 47a6 6 0 0 1-6 5H48a6 6 0 0 1-6-5z"/></svg>
+</template>
+<template id="il-search">
+  <svg class="il" viewBox="0 0 200 150"><ellipse class="b" cx="100" cy="82" rx="78" ry="54"/>
+    <g class="float"><circle class="p" cx="90" cy="68" r="32"/><circle class="b" cx="90" cy="68" r="22"/>
+    <path class="s thick" d="M113 91l26 26"/>
+    <path class="s" d="M83 61a8 8 0 1 1 9 8v6M92 82v1"/></g></svg>
+</template>
+<template id="il-graph">
+  <svg class="il" viewBox="0 0 200 150"><ellipse class="b" cx="100" cy="80" rx="80" ry="56"/>
+    <path class="s" d="M60 50l40 26 44-30M100 76l-14 40M100 76l46 30M60 50l-10 50"/>
+    <g class="float"><circle class="t" cx="100" cy="76" r="12"/></g>
+    <circle class="a2" cx="60" cy="50" r="8"/><circle class="p" cx="144" cy="46" r="8"/>
+    <circle class="p" cx="86" cy="116" r="7"/><circle class="a2" cx="146" cy="106" r="9"/><circle class="p" cx="50" cy="100" r="6"/></svg>
+</template>
+
+<script src="crypto.js"></script>
+<script src="graph.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
