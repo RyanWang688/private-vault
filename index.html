@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; form-action 'none'; base-uri 'none'">
+<title>私人保险箱</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main id="app">
+
+  <!-- 创建 -->
+  <section id="view-setup" class="card narrow" hidden>
+    <h1>创建保险箱</h1>
+    <p class="muted">设置一个主密码。所有数据都会用它在你的浏览器里加密，<b>主密码不会被保存在任何地方，忘记后无法找回</b>。</p>
+    <form id="form-setup">
+      <label>主密码（至少 12 位）<input type="password" id="setup-pw" autocomplete="new-password" minlength="12" required></label>
+      <label>再输入一次<input type="password" id="setup-pw2" autocomplete="new-password" minlength="12" required></label>
+      <button type="submit" class="primary">创建</button>
+      <p class="error" id="setup-err"></p>
+    </form>
+    <hr>
+    <p class="muted">已有加密文件？</p>
+    <label class="btn">导入 vault.json<input type="file" id="setup-import" accept=".json,application/json" hidden></label>
+  </section>
+
+  <!-- 解锁 -->
+  <section id="view-lock" class="card narrow" hidden>
+    <h1>🔒 已锁定</h1>
+    <p class="muted" id="lock-source"></p>
+    <form id="form-unlock">
+      <label>主密码<input type="password" id="unlock-pw" autocomplete="current-password" required autofocus></label>
+      <button type="submit" class="primary" id="unlock-btn">解锁</button>
+      <p class="error" id="unlock-err"></p>
+    </form>
+  </section>
+
+  <!-- 主界面 -->
+  <section id="view-main" hidden>
+    <header class="topbar">
+      <h1>私人保险箱</h1>
+      <div class="actions">
+        <span id="dirty" class="badge" hidden>有未同步到 GitHub 的更改</span>
+        <button id="btn-export">导出加密文件</button>
+        <button id="btn-settings">设置</button>
+        <button id="btn-lock" class="primary">锁定</button>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button data-tab="accounts" class="active">账号密码</button>
+      <button data-tab="notes">个人信息</button>
+      <button data-tab="files">文件</button>
+    </nav>
+
+    <input type="search" id="search" placeholder="搜索…">
+
+    <div id="tab-accounts" class="tab">
+      <button class="primary add" id="add-account">+ 新增账号</button>
+      <ul id="list-accounts" class="list"></ul>
+    </div>
+    <div id="tab-notes" class="tab" hidden>
+      <button class="primary add" id="add-note">+ 新增信息</button>
+      <ul id="list-notes" class="list"></ul>
+    </div>
+    <div id="tab-files" class="tab" hidden>
+      <label class="btn primary add">+ 上传文件<input type="file" id="add-file" multiple hidden></label>
+      <p class="muted small">文件会加密后存入保险箱。单个文件建议小于 20MB（GitHub 单文件上限 100MB）。</p>
+      <ul id="list-files" class="list"></ul>
+    </div>
+  </section>
+</main>
+
+<!-- 编辑对话框 -->
+<dialog id="dlg-edit">
+  <form id="form-edit" method="dialog">
+    <h2 id="edit-title"></h2>
+    <div id="edit-fields"></div>
+    <div class="row end">
+      <button type="button" id="edit-delete" class="danger">删除</button>
+      <span class="spacer"></span>
+      <button type="button" id="edit-cancel">取消</button>
+      <button type="submit" class="primary">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- 设置 -->
+<dialog id="dlg-settings">
+  <form id="form-settings" method="dialog">
+    <h2>设置</h2>
+    <h3>修改主密码</h3>
+    <label>当前主密码<input type="password" id="set-old" autocomplete="current-password"></label>
+    <label>新主密码（至少 12 位）<input type="password" id="set-new" autocomplete="new-password"></label>
+    <label>再输入一次<input type="password" id="set-new2" autocomplete="new-password"></label>
+    <button type="button" id="set-change" class="primary">修改</button>
+    <p class="error" id="set-err"></p>
+    <h3>同步</h3>
+    <p class="muted small">本设备的数据保存在浏览器里。要在其他设备上看到最新内容：点“导出加密文件”，把下载的 <code>vault.json</code> 替换到 GitHub 仓库里并提交。</p>
+    <label class="btn">从文件导入（覆盖本设备）<input type="file" id="set-import" accept=".json,application/json" hidden></label>
+    <button type="button" id="set-reload">重新加载 GitHub 上的版本（丢弃本设备更改）</button>
+    <h3>自动锁定</h3>
+    <p class="muted small">无操作 5 分钟后自动锁定。</p>
+    <div class="row end"><button type="button" id="set-close">关闭</button></div>
+  </form>
+</dialog>
+
+<div id="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>
