@@ -401,6 +401,15 @@ details.sub[open] summary { margin-bottom: 12px; }
 .pw-wrap .icon-btn { border: 1px solid var(--line); background: var(--surface-2); height: auto; align-self: stretch; width: 40px; }
 .menu .t-file { --tc: var(--c-file); }
 
+.badge-ic.has-img { background: #fff; padding: 5px; box-shadow: inset 0 0 0 1px rgba(0,0,0,.08); overflow: hidden; }
+.badge-ic.has-img img { width: 100%; height: 100%; object-fit: contain; border-radius: 5px; display: block; }
+.badge-ic.has-img + .card-titles { padding-left: 0; }
+.card .badge-ic.has-img { animation: pop .4s var(--spring); }
+.icon-pick { display: flex; align-items: center; gap: 14px; padding: 12px; border: 1.5px dashed var(--line-strong); border-radius: 14px; outline: none; transition: border-color .2s, background .2s; }
+.icon-pick:focus, .icon-pick:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 5%, transparent); }
+.icon-pick .badge-ic { width: 48px; height: 48px; border-radius: 13px; }
+.row.tight { margin: 0 0 6px; gap: 6px; }
+.btn.sm { padding: 5px 10px; font-size: 13px; border-radius: 8px; }
 #kit-ack-wrap { padding: 10px 12px; border-radius: 12px; background: var(--surface-2); color: var(--fg); }
 #kit-ack-wrap.need { outline: 2px solid var(--danger); animation: shake .45s; }
 

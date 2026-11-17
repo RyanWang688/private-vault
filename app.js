@@ -83,6 +83,83 @@
     for (const c of kids.flat()) if (c != null && c !== false) n.append(c.nodeType ? c : String(c));
     return n;
   }
+  // 卡片图标：有自定义/网站图标就显示图片，否则显示分类图标
+  function badge(it) {
+    const b = h('span', { class: 'badge-ic' });
+    if (it.icon && it.icon.src) {
+      b.classList.add('has-img');
+      const img = h('img', { src: it.icon.src, alt: '', referrerPolicy: 'no-referrer', draggable: false });
+      img.addEventListener('error', () => { b.classList.remove('has-img'); b.replaceChildren(icon(it.type)); });
+      b.append(img);
+    } else b.append(icon(it.type));
+    return b;
+  }
+  function loadImg(src, cors) {
+    return new Promise((res) => {
+      const img = new Image();
+      img.referrerPolicy = 'no-referrer';
+      if (cors) img.crossOrigin = 'anonymous';
+      const t = setTimeout(() => res(null), 6000);
+      img.onload = () => { clearTimeout(t); res(img.naturalWidth > 1 ? img : null); };
+      img.onerror = () => { clearTimeout(t); res(null); };
+      img.src = src;
+    });
+  }
+  function toIconData(img) {
+    const c = document.createElement('canvas');
+    c.width = c.height = 96;
+    const x = c.getContext('2d');
+    const s = Math.min(96 / img.naturalWidth, 96 / img.naturalHeight);
+    const w = img.naturalWidth * s, hh = img.naturalHeight * s;
+    x.drawImage(img, (96 - w) / 2, (96 - hh) / 2, w, hh);
+    return c.toDataURL('image/png'); // 跨域且无 CORS 时会抛错
+  }
+  // 只向该网站自己请求图标，不经过任何第三方图标服务
+  async function fetchSiteIcon(url) {
+    let origin;
+    try { origin = new URL(/^https?:\/\//i.test(url) ? url : 'https://' + url).origin; } catch { return null; }
+    if (!/^https:/.test(origin)) return null;
+    for (const p of ['/apple-touch-icon.png', '/favicon.ico', '/favicon.png', '/favicon.svg']) {
+      const src = origin + p;
+      const a = await loadImg(src, true);
+      if (a) { try { return { kind: 'data', src: toIconData(a), from: origin }; } catch { /* 改用链接 */ } }
+      const b = await loadImg(src, false);
+      if (b) return { kind: 'url', src, from: origin };
+    }
+    return null;
+  }
+  async function iconFromBlob(blob) {
+    const url = URL.createObjectURL(blob);
+    try { const img = await loadImg(url, false); return img ? { kind: 'data', src: toIconData(img) } : null; }
+    finally { URL.revokeObjectURL(url); }
+  }
+  function iconPicker(it) {
+    const input = h('input', { type: 'file', accept: 'image/*', hidden: true });
+    const status = h('small', { class: 'meta' });
+    const set = (ic, msg) => { if (ic) { it.icon = ic; renderEditor(); toast(msg || '图标已更新'); } };
+    const fromUrl = async () => {
+      const url = it.fields.url;
+      if (!url) { status.textContent = '先在下面的“网址”里填上网站地址'; return; }
+      status.textContent = '正在从该网站获取图标…';
+      const ic = await fetchSiteIcon(url);
+      if (ic) set(ic, '已获取网站图标'); else status.textContent = '这个网站没有提供可用的图标，可以上传或粘贴一张图片';
+    };
+    input.addEventListener('change', async () => { const f = input.files[0]; if (f) set(await iconFromBlob(f)); });
+    const box = h('div', { class: 'icon-pick', tabIndex: 0, title: '可以直接 Ctrl+V 粘贴图片' },
+      badge(it),
+      h('div', { class: 'f-main' },
+        h('div', { class: 'row wrap tight' },
+          it.type === 'login' ? h('button', { type: 'button', class: 'btn sm', onclick: fromUrl }, '从网址获取') : null,
+          h('button', { type: 'button', class: 'btn sm', onclick: () => input.click() }, '上传图片'),
+          it.icon ? h('button', { type: 'button', class: 'btn sm danger', onclick: () => { delete it.icon; renderEditor(); } }, '移除') : null),
+        status.textContent ? status : h('small', { class: 'meta', textContent: '也可以点这里后按 Ctrl+V 粘贴 logo 截图' }), status),
+      input);
+    box.addEventListener('paste', async (e) => {
+      const f = [...(e.clipboardData && e.clipboardData.files || [])].find((x) => x.type.startsWith('image/'));
+      if (f) { e.preventDefault(); set(await iconFromBlob(f)); }
+    });
+    return h('div', { class: 'field' }, h('span', { textContent: '图标' }), box);
+  }
   const iconBtn = (name, title, fn, cls = '') => h('button', { type: 'button', class: 'icon-btn ' + cls, title, 'aria-label': title,
     onclick: (e) => { e.stopPropagation(); fn(e); } }, icon(name));
   const fmtSize = (n) => n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(1) + ' MB';
@@ -525,7 +602,7 @@
     const el = h('article', { class: `card t-${it.type}${S.fresh && S.fresh.has(it.id) ? ' fresh' : ''}`, tabIndex: 0, dataset: { id: it.id },
       onclick: () => openDrawer(it.id), onkeydown: (e) => { if (e.key === 'Enter') openDrawer(it.id); } });
     el.append(h('div', { class: 'card-head' },
-      h('span', { class: 'badge-ic' }, icon(it.type)),
+      badge(it),
       h('div', { class: 'card-titles' }, h('div', { class: 'card-title', textContent: it.title || '未命名' }), h('div', { class: 'card-type', textContent: t.label })),
       it.fav ? h('span', { class: 'star' }, icon('star')) : null));
     const qa = h('div', { class: 'qa' });
@@ -767,7 +844,7 @@
     return { out: [...out].map(byId), back };
   }
   const relEl = (o, note) => h('button', { type: 'button', class: `rel t-${o.type}`, onclick: () => openDrawer(o.id) },
-    h('span', { class: 'badge-ic' }, icon(o.type)), o.title || '未命名', h('small', { textContent: note }));
+    badge(o), o.title || '未命名', h('small', { textContent: note }));
 
   function fileSection(it) {
     const box = sec(null);
@@ -799,7 +876,7 @@
     dr.className = `drawer open t-${it.type}`;
     const fav = iconBtn('star', it.fav ? '取消收藏' : '收藏', async () => { it.fav = !it.fav; await save(); render(); renderDrawer(); }, it.fav ? 'on' : '');
     const head = h('div', { class: 'drawer-head' },
-      h('span', { class: 'badge-ic' }, icon(it.type)),
+      badge(it),
       h('div', { class: 'card-titles' }, h('h2', { textContent: it.title || '未命名' }), h('div', { class: 'card-type', textContent: t.label })),
       h('div', { class: 'tools' }, fav,
         iconBtn('edit', '编辑', () => openDrawer(it.id, true, structuredClone(it))),
@@ -898,7 +975,7 @@
     const isNew = !byId(it.id);
     dr.className = `drawer open t-${it.type}`;
     const head = h('div', { class: 'drawer-head' },
-      h('span', { class: 'badge-ic' }, icon(it.type)),
+      badge(it),
       h('div', { class: 'card-titles' }, h('h2', { textContent: isNew ? '新建' + TYPES[it.type].short : '编辑' }), h('div', { class: 'card-type', textContent: TYPES[it.type].label })),
       h('div', { class: 'tools' }, iconBtn('x', '关闭', cancelEdit)));
     const body = h('div', { class: 'drawer-body' });
@@ -908,6 +985,7 @@
     }
     const titleField = inputField('名称', it.title, (v) => { it.title = v; }, { ph: { login: '例如：学校邮箱', identity: '例如：我的护照', bank: '例如：工资卡', note: '例如：租房信息', file: '默认使用文件名' }[it.type] });
     body.append(titleField);
+    if (it.type !== 'file') body.append(iconPicker(it));
     if (it.type === 'file') body.append(filePicker(it));
     for (const f of TYPES[it.type].fields) body.append(f.secret ? secretField(it, f) : inputField(f.l, it.fields[f.k], (v) => { it.fields[f.k] = v; }, { ph: f.ph }));
     body.append(h('div', { class: 'field' }, h('span', { textContent: '标签' }),
@@ -943,6 +1021,16 @@
     render();
     renderDrawer();
     toast('已加密保存');
+    // 有网址但还没有图标：自动从该网站获取一次
+    if (it.type === 'login' && it.fields.url && !it.icon) {
+      const ic = await fetchSiteIcon(it.fields.url);
+      if (ic && S.key && byId(it.id) === it) {
+        it.icon = ic;
+        await save();
+        render();
+        if (S.drawer && S.drawer.id === it.id && !S.drawer.edit) renderDrawer();
+      }
+    }
   }
   async function removeItem(it) {
     if (!(await ask('删除这张卡片？', `“${it.title || '未命名'}”会从保险箱中删除，此操作不能撤销。`))) return;
