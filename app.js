@@ -36,6 +36,7 @@
     upload: '<path d="M12 16V5m-4.5 4.5L12 5l4.5 4.5M4.5 19.5h15"/>',
     sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/>',
     moon: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',
+    clip: '<path d="M20 11.5l-8.2 8.2a5 5 0 0 1-7.1-7.1l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8"/>',
     image: '<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="10" r="1.8"/><path d="M20.5 16l-5-5-9 8.5"/>',
   };
   function icon(name) {
@@ -52,7 +53,7 @@
       { k: 'username', l: '账号 / 邮箱', copy: true },
       { k: 'password', l: '密码', secret: true, copy: true, gen: true },
       { k: 'url', l: '网址', url: true, copy: true, ph: 'https://' }] },
-    identity: { label: '证件信息', short: '证件', fields: [
+    identity: { label: '证件信息', short: '证件', attach: true, fields: [
       { k: 'name', l: '姓名', copy: true },
       { k: 'kind', l: '证件类型', ph: '身份证 / 护照 / 驾照 / 学生证…' },
       { k: 'number', l: '证件号码', secret: true, copy: true },
@@ -224,9 +225,9 @@
   const findByTitle = (t) => { const k = t.trim().toLowerCase(); return S.data.items.find((i) => (i.title || '').trim().toLowerCase() === k); };
 
   function newItem(type) {
-    return { id: uid(), type, title: '', fields: {}, tags: [], links: [], note: '', fav: false, created: now(), updated: now() };
+    return { id: uid(), type, title: '', fields: {}, tags: [], links: [], attachments: [], note: '', fav: false, created: now(), updated: now() };
   }
-  function fixItem(it) { return Object.assign({ title: '', fields: {}, tags: [], links: [], note: '', fav: false, created: now(), updated: now() }, it); }
+  function fixItem(it) { return Object.assign({ title: '', fields: {}, tags: [], links: [], attachments: [], note: '', fav: false, created: now(), updated: now() }, it); }
   function normalizeData(o) {
     if (o && o.version === 2) {
       o.items = (o.items || []).map(fixItem);
@@ -471,7 +472,7 @@
   // ================= 渲染 =================
   function haystack(it) {
     const t = TYPES[it.type];
-    const parts = [it.title, t.label, it.note, ...it.tags, it.file && it.file.name];
+    const parts = [it.title, t.label, it.note, ...it.tags, it.file && it.file.name, ...(it.attachments || []).map((a) => a.name)];
     for (const f of t.fields) if (!f.secret) parts.push(it.fields[f.k]);
     if (it.type === 'bank' && it.fields.number) parts.push(it.fields.number.replace(/\D/g, '').slice(-4));
     return parts.filter(Boolean).join('\n').toLowerCase();
@@ -633,6 +634,10 @@
       qa.append(iconBtn('download', '下载', () => downloadItem(it), 'sm'));
       makeDraggable(el, it);
     }
+    if (it.attachments && it.attachments.length) {
+      el.append(h('div', { class: 'card-att' }, icon('clip'),
+        it.attachments.length === 1 ? it.attachments[0].name : `${it.attachments.length} 个附件`));
+    }
     if (it.type !== 'note' && it.note) el.append(h('div', { class: 'card-note one', textContent: it.note.replace(/\[\[([^\]]+)\]\]/g, '$1') }));
     if (it.tags.length) {
       const shown = it.tags.slice(0, 3);
@@ -689,36 +694,91 @@
   }
 
   // ---------------- 文件 ----------------
-  function fileEntry(it) {
-    const key = it.id + ':' + it.updated;
-    let c = S.urls.get(it.id);
-    if (c && c.key === key) return c;
-    if (c) URL.revokeObjectURL(c.url);
-    const blob = new Blob([C.unb64(it.file.data)], { type: it.file.mime || 'application/octet-stream' });
-    c = { key, blob, url: URL.createObjectURL(blob) };
-    S.urls.set(it.id, c);
+  // f = { name, mime, size, data }；key 用于缓存解密后的 Blob（锁定时全部释放）
+  function blobEntry(f, key) {
+    let c = S.urls.get(key);
+    if (c) return c;
+    const blob = new Blob([C.unb64(f.data)], { type: f.mime || 'application/octet-stream' });
+    c = { blob, url: URL.createObjectURL(blob) };
+    S.urls.set(key, c);
     return c;
   }
+  const fileKey = (it) => it.id + ':' + it.updated;
+  const attKey = (a) => 'att:' + a.id;
+  const fileEntry = (it) => blobEntry(it.file, fileKey(it));
   const fileURL = (it) => fileEntry(it).url;
-  function downloadItem(it) {
-    const a = h('a', { href: fileURL(it), download: it.file.name });
+  function downloadF(f, key) {
+    const a = h('a', { href: blobEntry(f, key).url, download: f.name });
     document.body.append(a); a.click(); a.remove();
   }
-  function makeDraggable(el, it) {
+  const downloadItem = (it) => downloadF(it.file, fileKey(it));
+  function draggableF(el, f, key) {
     el.draggable = true;
     el.addEventListener('dragstart', (e) => {
       S.dragOut = true;
-      const c = fileEntry(it);
-      const name = it.file.name.replace(/[:\r\n]/g, '_');
-      const mime = it.file.mime || 'application/octet-stream';
+      const c = blobEntry(f, key);
+      const name = f.name.replace(/[:\r\n]/g, '_');
+      const mime = f.mime || 'application/octet-stream';
       const dt = e.dataTransfer;
       dt.effectAllowed = 'copy';
       dt.setData('DownloadURL', `${mime}:${name}:${c.url}`); // Chrome / Edge：拖到桌面或文件夹
-      dt.setData('text/plain', it.file.name);
-      try { dt.items.add(new File([c.blob], it.file.name, { type: mime })); } catch { /* 部分浏览器不支持 */ }
+      dt.setData('text/plain', f.name);
+      try { dt.items.add(new File([c.blob], f.name, { type: mime })); } catch { /* 部分浏览器不支持 */ }
       el.classList.add('dragging');
     });
     el.addEventListener('dragend', () => { S.dragOut = false; el.classList.remove('dragging'); });
+  }
+  const makeDraggable = (el, it) => draggableF(el, it.file, fileKey(it));
+  const isPdf = (f) => f.mime === 'application/pdf' || /\.pdf$/i.test(f.name);
+
+  // ---------------- 附件（证件等） ----------------
+  function attachSection(it) {
+    const list = h('div', { class: 'att-list' });
+    for (const a of it.attachments) {
+      const key = attKey(a);
+      const pv = h('div', { class: 'att-preview' });
+      let open = false;
+      const canPreview = isPdf(a) || (a.mime || '').startsWith('image/');
+      const toggle = () => {
+        open = !open;
+        if (!open) { pv.replaceChildren(); row.classList.remove('open'); return; }
+        const url = blobEntry(a, key).url;
+        pv.replaceChildren(isPdf(a)
+          ? h('iframe', { src: url, title: a.name })
+          : h('img', { src: url, alt: a.name, draggable: false }));
+        row.classList.add('open');
+      };
+      const row = h('div', { class: 'drag-out', title: '按住拖到桌面、文件夹或其他网站的上传区' },
+        h('span', { class: 'grip' }, icon('grip')),
+        h('div', { class: 'file-ext', textContent: extOf(a.name) }),
+        h('div', { class: 'f-main' }, h('div', { class: 'card-title', textContent: a.name }), h('small', { textContent: `${fmtSize(a.size)} · 按住拖出去` })),
+        canPreview ? iconBtn('eye', '预览', toggle) : null,
+        isPdf(a) ? iconBtn('open', '在新标签页打开', () => window.open(blobEntry(a, key).url, '_blank', 'noopener')) : null,
+        iconBtn('download', '下载', () => downloadF(a, key)));
+      draggableF(row, a, key);
+      list.append(h('div', { class: 'att' }, row, pv));
+    }
+    return sec(`附件 · ${it.attachments.length}`, list);
+  }
+  function attachEditor(it) {
+    const input = h('input', { type: 'file', accept: '.pdf,application/pdf,image/*', multiple: true, hidden: true });
+    const take = async (files) => {
+      for (const f of files) {
+        if (f.size > MAX_FILE) { toast(`“${f.name}”超过 25MB，已跳过`, false); continue; }
+        it.attachments.push(Object.assign({ id: uid() }, await readFile(f)));
+      }
+      renderEditor();
+    };
+    input.addEventListener('change', () => take([...input.files]));
+    const pick = h('div', { class: 'file-pick', onclick: () => input.click() }, h('span', { class: 'grip' }, icon('clip')),
+      h('div', { class: 'f-main' }, h('div', { class: 'card-title', textContent: '添加 PDF 或图片' }), h('small', { class: 'meta', textContent: '点击选择，或把文件拖到这里 · 单个最大 25MB' })), input);
+    pick.addEventListener('dragover', (e) => { e.preventDefault(); pick.classList.add('over'); });
+    pick.addEventListener('dragleave', () => pick.classList.remove('over'));
+    pick.addEventListener('drop', (e) => { e.preventDefault(); e.stopPropagation(); pick.classList.remove('over'); take([...e.dataTransfer.files]); });
+    const rows = it.attachments.map((a) => h('div', { class: 'att-edit' }, h('div', { class: 'file-ext', textContent: extOf(a.name) }),
+      h('div', { class: 'f-main' }, h('div', { class: 'card-title', textContent: a.name }), h('small', { class: 'meta', textContent: fmtSize(a.size) })),
+      iconBtn('trash', '移除', () => { it.attachments = it.attachments.filter((x) => x !== a); renderEditor(); })));
+    return h('div', { class: 'field' }, h('span', { textContent: '附件' }), h('div', { class: 'att-list' }, ...rows, pick));
   }
   async function copyImage(it) {
     try {
@@ -892,6 +952,7 @@
     }
     const rows = t.fields.map((f) => fieldRow(f, it.fields[f.k])).filter(Boolean);
     if (rows.length) body.append(sec(null, h('div', { class: 'fields' }, ...rows)));
+    if (it.attachments && it.attachments.length) body.append(attachSection(it));
     if (it.note) body.append(sec(it.type === 'note' ? '内容' : '备注', noteView(it.note)));
     if (!rows.length && !it.note && it.type !== 'file') body.append(h('p', { class: 'hint', textContent: '这张卡片还没有内容，点右上角的编辑按钮补充。' }));
     if (it.tags.length) body.append(sec('标签', h('div', { class: 'chips' }, ...it.tags.map((g) => h('span', { class: 'chip', textContent: '#' + g, onclick: () => { closeDrawer(); setFilter('tag', g); } })))));
@@ -988,6 +1049,7 @@
     if (it.type !== 'file') body.append(iconPicker(it));
     if (it.type === 'file') body.append(filePicker(it));
     for (const f of TYPES[it.type].fields) body.append(f.secret ? secretField(it, f) : inputField(f.l, it.fields[f.k], (v) => { it.fields[f.k] = v; }, { ph: f.ph }));
+    if (TYPES[it.type].attach) { it.attachments = it.attachments || []; body.append(attachEditor(it)); }
     body.append(h('div', { class: 'field' }, h('span', { textContent: '标签' }),
       chipEditor(() => it.tags, (l) => { it.tags = l; }, (g) => '#' + g, (v) => v.replace(/^[#\s]+/, '').trim(), '输入后按回车', 'dl-tags')));
     body.append(h('div', { class: 'field' }, h('span', { textContent: '关联卡片' }),
@@ -1009,6 +1071,7 @@
     if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); // 提交未完成的标签输入
     if (it.type === 'file' && !it.file) { toast('请先选择文件', false); return; }
     if (it.type !== 'file') delete it.file;
+    if (!TYPES[it.type].attach) it.attachments = [];
     it.title = (it.title || '').trim() || (it.file && it.file.name) || '未命名';
     const keep = {};
     for (const f of TYPES[it.type].fields) if (it.fields[f.k]) keep[f.k] = it.fields[f.k];
