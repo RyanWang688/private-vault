@@ -355,11 +355,19 @@
     $('#kit-secret').textContent = C.formatSecret(S.secret.bytes);
     $('#kit-ack').checked = false;
     $('#kit-ack-wrap').hidden = !required;
-    $('#kit-done').disabled = required;
+    $('#kit-ack-wrap').classList.remove('need');
     d.dataset.required = required ? '1' : '';
     d.showModal();
   }
-  $('#kit-ack').addEventListener('change', () => { $('#kit-done').disabled = !$('#kit-ack').checked; });
+  $('#kit-done').addEventListener('click', (e) => {
+    if ($('#dlg-kit').dataset.required && !$('#kit-ack').checked) {
+      e.preventDefault();
+      const w = $('#kit-ack-wrap');
+      w.classList.remove('need'); void w.offsetWidth; w.classList.add('need');
+      toast('请先保存秘密钥匙，并勾选“我已经保存”', false);
+    }
+  });
+  $('#kit-ack').addEventListener('change', () => $('#kit-ack-wrap').classList.remove('need'));
   $('#dlg-kit').addEventListener('cancel', (e) => { if ($('#dlg-kit').dataset.required && !$('#kit-ack').checked) e.preventDefault(); });
   $('#kit-copy').addEventListener('click', () => copyText(C.formatSecret(S.secret.bytes), '秘密钥匙'));
   $('#kit-download').addEventListener('click', () => {

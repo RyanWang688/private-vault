@@ -401,6 +401,9 @@ details.sub[open] summary { margin-bottom: 12px; }
 .pw-wrap .icon-btn { border: 1px solid var(--line); background: var(--surface-2); height: auto; align-self: stretch; width: 40px; }
 .menu .t-file { --tc: var(--c-file); }
 
+#kit-ack-wrap { padding: 10px 12px; border-radius: 12px; background: var(--surface-2); color: var(--fg); }
+#kit-ack-wrap.need { outline: 2px solid var(--danger); animation: shake .45s; }
+
 /* ============ 手机 ============ */
 @media (max-width: 820px) {
   #screen-app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
