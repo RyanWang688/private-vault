@@ -200,7 +200,7 @@ select { width: auto; cursor: pointer; }
 /* ============ 卡片 ============ */
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(232px, 1fr)); gap: 14px; align-items: start; }
 .t-login { --tc: var(--c-login); } .t-identity { --tc: var(--c-identity); } .t-bank { --tc: var(--c-bank); }
-.t-note { --tc: var(--c-note); } .t-file { --tc: var(--c-file); } .t-all { --tc: var(--accent); } .t-fav { --tc: var(--c-note); }
+.t-note { --tc: var(--c-note); } .t-file { --tc: var(--c-file); } .t-all { --tc: var(--accent); }
 .card { position: relative; background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 14px; cursor: pointer;
   box-shadow: var(--shadow-sm); display: flex; flex-direction: column; gap: 10px; overflow: hidden; outline: none;
   transition: transform .3s var(--ease), box-shadow .3s var(--ease), border-color .3s; }
@@ -220,8 +220,6 @@ select { width: auto; cursor: pointer; }
 .card-sub { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-sub.mono { font-size: 12.5px; }
 .card-note { color: var(--muted); font-size: 13px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; }
-.card .star { color: var(--c-note); margin-left: auto; flex: none; }
-.card .star svg { width: 15px; height: 15px; fill: currentColor; }
 .chips { display: flex; flex-wrap: wrap; gap: 5px; }
 .chip { font-size: 11.5px; padding: 2px 8px; border-radius: 99px; background: var(--surface-2); color: var(--muted); border: 1px solid var(--line); cursor: pointer; transition: background .2s, color .2s; white-space: nowrap; }
 .chip:hover { color: var(--fg); background: color-mix(in srgb, var(--accent) 10%, var(--surface-2)); }

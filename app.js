@@ -266,9 +266,9 @@
   const findByTitle = (t) => { const k = t.trim().toLowerCase(); return S.data.items.find((i) => (i.title || '').trim().toLowerCase() === k); };
 
   function newItem(type) {
-    return { id: uid(), type, title: '', fields: {}, tags: [], links: [], attachments: [], note: '', fav: false, created: now(), updated: now() };
+    return { id: uid(), type, title: '', fields: {}, tags: [], links: [], attachments: [], note: '', created: now(), updated: now() };
   }
-  function fixItem(it) { return Object.assign({ title: '', fields: {}, tags: [], links: [], attachments: [], note: '', fav: false, created: now(), updated: now() }, it); }
+  function fixItem(it) { const o = Object.assign({ title: '', fields: {}, tags: [], links: [], attachments: [], note: '', created: now(), updated: now() }, it); delete o.fav; return o; }
   function normalizeData(o) {
     if (o && o.version === 2) {
       o.items = (o.items || []).map(fixItem);
@@ -647,7 +647,6 @@
     let list = S.data.items;
     const f = S.filter;
     if (f.kind === 'type') list = list.filter((i) => i.type === f.value);
-    else if (f.kind === 'fav') list = list.filter((i) => i.fav);
     else if (f.kind === 'tag') list = list.filter((i) => i.tags.includes(f.value));
     const toks = S.query.toLowerCase().split(/\s+/).filter(Boolean);
     if (toks.length) list = list.filter((it) => {
@@ -662,12 +661,11 @@
       title: (a, b) => (a.title || '').localeCompare(b.title || '', 'zh'),
       type: (a, b) => TYPE_ORDER.indexOf(a.type) - TYPE_ORDER.indexOf(b.type) || (a.title || '').localeCompare(b.title || '', 'zh'),
     }[S.sort];
-    return list.slice().sort((a, b) => (b.fav - a.fav) || cmp(a, b));
+    return list.slice().sort(cmp);
   }
   function filterLabel() {
     const f = S.filter;
     if (f.kind === 'type') return TYPES[f.value].label;
-    if (f.kind === 'fav') return '收藏';
     if (f.kind === 'tag') return '#' + f.value;
     return '全部';
   }
@@ -691,7 +689,6 @@
     const nav = $('#nav-types');
     const entries = [
       ['all', null, '全部', items.length, 'all', 'all'],
-      ['fav', null, '收藏', items.filter((i) => i.fav).length, 'star', 'fav'],
       ...TYPE_ORDER.map((t) => ['type', t, TYPES[t].label, items.filter((i) => i.type === t).length, t, t]),
     ];
     nav.replaceChildren(...entries.map(([kind, value, label, n, ic, tc]) => {
@@ -771,8 +768,7 @@
       onclick: () => openDrawer(it.id), onkeydown: (e) => { if (e.key === 'Enter') openDrawer(it.id); } });
     el.append(h('div', { class: 'card-head' },
       badge(it),
-      h('div', { class: 'card-titles' }, h('div', { class: 'card-title', textContent: it.title || '未命名' }), h('div', { class: 'card-type', textContent: t.label })),
-      it.fav ? h('span', { class: 'star' }, icon('star')) : null));
+      h('div', { class: 'card-titles' }, h('div', { class: 'card-title', textContent: it.title || '未命名' }), h('div', { class: 'card-type', textContent: t.label }))));
     const qa = h('div', { class: 'qa' });
     if (it.type === 'login') {
       const host = (() => { try { return new URL(F.url).host; } catch { return F.url; } })();
@@ -819,7 +815,6 @@
   // ---------------- 空状态 ----------------
   const EMPTY = {
     all: ['il-all', '保险箱还是空的', '新建一张卡片，或者直接把文件拖进窗口'],
-    fav: ['il-all', '还没有收藏', '在卡片详情里点星标即可收藏'],
     login: ['il-login', '还没有账号密码', '把常用网站和 App 的登录信息存进来'],
     identity: ['il-identity', '还没有证件信息', '身份证、护照、驾照号码都可以放在这里'],
     bank: ['il-bank', '还没有银行卡', '卡号、CVV 都会加密保存，卡片上只显示后四位'],
@@ -1240,7 +1235,7 @@
     if (!added.length) return;
     await save();
     S.fresh = new Set(added);
-    if (S.filter.kind === 'fav' || (S.filter.kind === 'type' && S.filter.value !== 'file')) S.filter = { kind: 'all' };
+    if ((S.filter.kind === 'type' && S.filter.value !== 'file')) S.filter = { kind: 'all' };
     render();
     toast(`已加密保存 ${added.length} 个文件`);
   }
@@ -1354,11 +1349,10 @@
     if (!it) { closeDrawer(); return; }
     const t = TYPES[it.type];
     dr.className = `drawer open t-${it.type}`;
-    const fav = iconBtn('star', it.fav ? '取消收藏' : '收藏', async () => { it.fav = !it.fav; await save(); render(); renderDrawer(); }, it.fav ? 'on' : '');
     const head = h('div', { class: 'drawer-head' },
       badge(it),
       h('div', { class: 'card-titles' }, h('h2', { textContent: it.title || '未命名' }), h('div', { class: 'card-type', textContent: t.label })),
-      h('div', { class: 'tools' }, fav,
+      h('div', { class: 'tools' },
         iconBtn('edit', '编辑', () => openDrawer(it.id, true, structuredClone(it))),
         iconBtn('trash', '删除', () => removeItem(it)),
         iconBtn('x', '关闭', closeDrawer)));
