@@ -5,6 +5,15 @@
 window.VGraph = (() => {
   const FONT = '12px system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif';
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  // 分组配色：12 种色相均匀分布、明度一致的颜色，深浅主题各一套
+  const PALETTE = {
+    dark: ['#8b9cff', '#ff8a7a', '#4fd1b5', '#f5c451', '#e48bf0', '#5cc8ff', '#a3dc5c', '#ff9fc4', '#ffb067', '#7de3e0', '#c3a4ff', '#f27fa0'],
+    light: ['#4f5fe0', '#e0553f', '#14a185', '#c99417', '#b54bc9', '#1f8fd1', '#5f9e1c', '#d4517f', '#d97a1f', '#169c99', '#7a55e0', '#c8385f'],
+  };
+  const hex = (c) => { const m = /^#?([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i.exec((c || '').trim()); return m ? [1, 2, 3].map((i) => parseInt(m[i], 16)) : [140, 140, 150]; };
+  const rgba = (c, a) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+  const mix = (c, w, t) => c.map((v, i) => v + (w[i] - v) * t);
+  function hashStr(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
 
   function create(canvas, opts = {}) {
     const ctx = canvas.getContext('2d');
@@ -24,6 +33,43 @@ window.VGraph = (() => {
         login: v('--c-login'), identity: v('--c-identity'), bank: v('--c-bank'), note: v('--c-note'),
         file: v('--c-file'), tag: v('--c-tag'), fg: v('--fg'), muted: v('--muted'), line: v('--line-strong'), bg: v('--bg'), accent: v('--accent'),
       };
+      const b = hex(colors.bg);
+      dark = (b[0] * 0.299 + b[1] * 0.587 + b[2] * 0.114) < 128;
+      bgRGB = b;
+      if (nodes.length) assignColors(true);
+    }
+    let dark = true, bgRGB = [12, 13, 18], mode = opts.colorMode === 'type' ? 'type' : 'group', groups = [];
+
+    // 按“关联项 / [[提及]]”连成的分组上色（标签连线不参与分组，否则会全部连成一团）
+    function assignColors(instant) {
+      const pal = PALETTE[dark ? 'dark' : 'light'];
+      const items = nodes.filter((n) => n.kind !== 'tag');
+      const parent = new Map(items.map((n) => [n, n]));
+      const find = (n) => { while (parent.get(n) !== n) { parent.set(n, parent.get(parent.get(n))); n = parent.get(n); } return n; };
+      for (const e of edges) if (e.s.kind !== 'tag' && e.t.kind !== 'tag') { const a = find(e.s), b = find(e.t); if (a !== b) parent.set(a, b); }
+      const comp = new Map();
+      for (const n of items) { const r = find(n); if (!comp.has(r)) comp.set(r, []); comp.get(r).push(n); }
+      const list = [...comp.values()].filter((g) => g.length > 1)
+        .map((g) => ({ members: g, key: g.map((n) => n.id).sort()[0], hub: g.reduce((a, b) => (b.deg > a.deg ? b : a)) }))
+        .sort((a, b) => b.members.length - a.members.length || a.key.localeCompare(b.key));
+      const used = new Set();
+      groups = list.map((g) => {
+        let i = hashStr(g.key) % pal.length;
+        if (used.size < pal.length) while (used.has(i)) i = (i + 1) % pal.length;
+        used.add(i);
+        const color = pal[i];
+        for (const n of g.members) n.group = color;
+        return { color, label: g.hub.label, size: g.members.length, ids: g.members.map((n) => n.id) };
+      });
+      for (const n of items) if (!comp.get(find(n)) || comp.get(find(n)).length < 2) n.group = null;
+      for (const n of nodes) {
+        const base = n.kind === 'tag' ? colors.tag : (mode === 'group' && n.group) ? n.group
+          : mode === 'group' ? colors[n.type] : colors[n.type];
+        n.tc = hex(base || colors.tag);
+        if (mode === 'group' && !n.group && n.kind !== 'tag') n.tc = mix(n.tc, hex(colors.muted), 0.35);
+        if (instant || !n.cc) n.cc = n.tc.slice();
+      }
+      kick();
     }
     function resize() {
       const r = canvas.getBoundingClientRect();
@@ -71,6 +117,7 @@ window.VGraph = (() => {
         n.placed = true;
       });
       if (hover && !byId.has(hover.id)) hover = null;
+      assignColors(false);
       if (!nodes.length) { fresh = true; alpha = 0; draw(); return; }
       if (fresh) {
         // 首次：先在后台把布局跑到基本稳定，再直接定好视角，打开就是整齐的
@@ -165,6 +212,10 @@ window.VGraph = (() => {
         [p.a, m1] = ease(p.a, targetA(p), 0.14);
         [p.s, m2] = ease(p.s, p === hover ? 1.35 : 1, 0.2);
         if (m1 || m2) moving = true;
+        if (p.cc && p.tc) for (let i = 0; i < 3; i++) {
+          const d = p.tc[i] - p.cc[i];
+          if (Math.abs(d) > 0.5) { p.cc[i] += d * 0.12; moving = true; } else p.cc[i] = p.tc[i];
+        }
       }
       draw();
       if (moving || drag) raf = requestAnimationFrame(frame);
@@ -180,37 +231,60 @@ window.VGraph = (() => {
 
       // 连线：先画普通的，再画高亮的，保证高亮线在上层
       ctx.lineCap = 'round';
-      ctx.strokeStyle = colors.line;
-      ctx.lineWidth = Math.max(0.6, Math.min(1.4, k));
+      const lw = Math.max(0.7, Math.min(1.6, k * 1.1));
+      const lineRGB = hex(colors.line);
       for (const e of edges) {
-        if (hover && (e.s === hover || e.t === hover)) continue;
+        const hot = hover && (e.s === hover || e.t === hover);
+        if (hot) continue;
         const a = Math.min(e.s.a, e.t.a);
         if (a < 0.02) continue;
-        ctx.globalAlpha = 0.75 * a;
-        ctx.beginPath(); ctx.moveTo(X(e.s), Y(e.s)); ctx.lineTo(X(e.t), Y(e.t)); ctx.stroke();
+        const x1 = X(e.s), y1 = Y(e.s), x2 = X(e.t), y2 = Y(e.t);
+        // 同一分组内的连线用分组颜色，渐变过渡；其他连线用中性色
+        if (mode === 'group' && e.s.group && e.s.group === e.t.group) {
+          const g = ctx.createLinearGradient(x1, y1, x2, y2);
+          g.addColorStop(0, rgba(e.s.cc, 0.55)); g.addColorStop(1, rgba(e.t.cc, 0.55));
+          ctx.strokeStyle = g; ctx.lineWidth = lw * 1.25;
+        } else { ctx.strokeStyle = rgba(lineRGB, 1); ctx.lineWidth = lw; }
+        ctx.globalAlpha = 0.85 * a;
+        ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
       }
       if (hover) {
-        ctx.strokeStyle = colors.accent; ctx.lineWidth = 1.6; ctx.globalAlpha = 0.9;
+        ctx.lineWidth = 1.8; ctx.globalAlpha = 0.95;
         for (const e of edges) {
           if (e.s !== hover && e.t !== hover) continue;
-          ctx.beginPath(); ctx.moveTo(X(e.s), Y(e.s)); ctx.lineTo(X(e.t), Y(e.t)); ctx.stroke();
+          const x1 = X(e.s), y1 = Y(e.s), x2 = X(e.t), y2 = Y(e.t);
+          const g = ctx.createLinearGradient(x1, y1, x2, y2);
+          g.addColorStop(0, rgba(e.s.cc, 1)); g.addColorStop(1, rgba(e.t.cc, 1));
+          ctx.strokeStyle = g;
+          ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
         }
       }
 
-      // 节点
+      // 节点：柔和光晕 + 径向渐变 + 高光，标签是空心环
       for (const p of nodes) {
         const x = X(p), y = Y(p), r = Math.max(2.2, p.r * k) * p.s;
-        const col = colors[p.type] || colors.tag;
+        const c = p.cc || hex(colors.tag);
         ctx.globalAlpha = Math.max(0.06, p.a);
-        if (p === hover) { ctx.shadowColor = col; ctx.shadowBlur = 16; }
-        ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
         if (p.kind === 'tag') {
+          ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
           ctx.fillStyle = colors.bg; ctx.fill();
-          ctx.lineWidth = 1.5; ctx.strokeStyle = col; ctx.stroke();
-        } else {
-          ctx.fillStyle = col; ctx.fill();
+          ctx.lineWidth = 1.5; ctx.strokeStyle = rgba(c, 1); ctx.stroke();
+          continue;
         }
-        ctx.shadowBlur = 0;
+        const halo = r + (p === hover ? 9 : 4.5);
+        const hg = ctx.createRadialGradient(x, y, r * 0.6, x, y, halo);
+        hg.addColorStop(0, rgba(c, p === hover ? 0.45 : 0.22)); hg.addColorStop(1, rgba(c, 0));
+        ctx.fillStyle = hg;
+        ctx.beginPath(); ctx.arc(x, y, halo, 0, Math.PI * 2); ctx.fill();
+        const light = mix(c, [255, 255, 255], dark ? 0.35 : 0.3), deep = mix(c, bgRGB, dark ? 0.18 : 0.08);
+        const fg = ctx.createRadialGradient(x - r * 0.35, y - r * 0.4, r * 0.1, x, y, r);
+        fg.addColorStop(0, rgba(light, 1)); fg.addColorStop(0.55, rgba(c, 1)); fg.addColorStop(1, rgba(deep, 1));
+        ctx.fillStyle = fg;
+        ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+        if (r > 4) {
+          ctx.lineWidth = 1; ctx.strokeStyle = rgba(mix(c, [255, 255, 255], 0.5), dark ? 0.35 : 0.55);
+          ctx.beginPath(); ctx.arc(x, y, r - 0.5, 0, Math.PI * 2); ctx.stroke();
+        }
       }
 
       // 文字：缩小时淡出；按优先级放置，互相重叠的就不画，避免糊成一片
@@ -367,6 +441,8 @@ window.VGraph = (() => {
     return {
       setData, setHighlight, fit, resize,
       refreshColors() { readColors(); kick(); },
+      setColorMode(m) { mode = m === 'type' ? 'type' : 'group'; assignColors(false); },
+      groups() { return groups; },
       zoom(f) { zoomAt(W / 2, H / 2, (camT ? camT.k : cam.k) * f, true); },
       reheat() { alpha = Math.max(alpha, 0.5); kick(); },
     };

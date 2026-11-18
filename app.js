@@ -1538,6 +1538,7 @@
   function ensureGraph() {
     if (S.graph) return;
     S.graph = window.VGraph.create($('#graph'), {
+      colorMode: graphMode(),
       onClick: (n) => { if (n.kind === 'tag') setFilter('tag', n.id.slice(1)); else openDrawer(n.id); },
     });
   }
@@ -1556,6 +1557,7 @@
       tags.forEach((g) => nodes.push({ id: '#' + g, label: '#' + g, type: 'tag', kind: 'tag' }));
     }
     S.graph.setData(nodes, edges);
+    S.groupFocus = null;
     let set = null;
     if (S.filter.kind !== 'all' || S.query.trim()) {
       set = new Set(visibleItems().map((i) => i.id));
@@ -1568,11 +1570,43 @@
     const ge = $('#graph-empty');
     ge.hidden = items.length > 0;
     if (!items.length) emptyState(ge, 'graph');
-    $('#graph-legend').replaceChildren(...[
-      ...TYPE_ORDER.map((tp) => h('span', { class: `t-${tp}` }, h('i'), TYPES[tp].short)),
-      S.graphTags ? h('span', null, h('i', { class: 'hollow' }), '标签') : null,
-      set ? h('span', { class: 't-all' }, h('i'), `匹配 ${[...set].filter((id) => id[0] !== '#').length} 项`) : null].filter(Boolean));
+    renderLegend(set);
   }
+  function graphMode() { try { return localStorage.getItem('pv-graph-color') === 'type' ? 'type' : 'group'; } catch { return 'group'; } }
+  function renderLegend(set) {
+    const mode = graphMode();
+    const chips = [];
+    if (mode === 'group') {
+      const gs = S.graph.groups();
+      gs.slice(0, 8).forEach((g) => {
+        const on = S.groupFocus === g.ids.join(',');
+        const b = h('button', { type: 'button', class: 'g-chip' + (on ? ' on' : ''), title: `只看这一组（${g.size} 项）`,
+          onclick: () => {
+            S.groupFocus = on ? null : g.ids.join(',');
+            S.graph.setHighlight(on ? (set || null) : new Set(g.ids), true);
+            renderLegend(set);
+          } }, h('i'), g.label.length > 10 ? g.label.slice(0, 9) + '…' : g.label, h('b', { textContent: g.size }));
+        b.style.setProperty('--tc', g.color);
+        chips.push(b);
+      });
+      if (gs.length > 8) chips.push(h('span', { class: 'muted-chip', textContent: `另有 ${gs.length - 8} 组` }));
+      if (!gs.length) chips.push(h('span', { class: 'muted-chip', textContent: '在卡片里添加“关联项”，相关的卡片会自动归为同一颜色' }));
+    } else {
+      chips.push(...TYPE_ORDER.map((tp) => h('span', { class: `t-${tp}` }, h('i'), TYPES[tp].short)));
+    }
+    if (S.graphTags) chips.push(h('span', null, h('i', { class: 'hollow' }), '标签'));
+    if (set) chips.push(h('span', { class: 't-all' }, h('i'), `匹配 ${[...set].filter((id) => id[0] !== '#').length} 项`));
+    $('#graph-legend').replaceChildren(...chips);
+    const btn = $('#g-color');
+    btn.textContent = mode === 'group' ? '按分组' : '按类型';
+    btn.title = mode === 'group' ? '颜色：按关联分组（点击切换为按类型）' : '颜色：按类型（点击切换为按关联分组）';
+  }
+  $('#g-color').addEventListener('click', () => {
+    const m = graphMode() === 'group' ? 'type' : 'group';
+    try { localStorage.setItem('pv-graph-color', m); } catch {}
+    S.groupFocus = null;
+    if (S.graph) { S.graph.setColorMode(m); updateGraph(); }
+  });
   $('#g-zoom-in').addEventListener('click', () => S.graph && S.graph.zoom(1.3));
   $('#g-zoom-out').addEventListener('click', () => S.graph && S.graph.zoom(1 / 1.3));
   $('#g-fit').addEventListener('click', () => S.graph && S.graph.fit());
