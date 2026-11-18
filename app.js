@@ -629,6 +629,8 @@
     } else if (it.type === 'file' && it.file) {
       if ((it.file.mime || '').startsWith('image/')) {
         el.append(h('div', { class: 'thumb' }, h('img', { src: fileURL(it), alt: '', loading: 'lazy', draggable: false })));
+      } else if (isPdf(it.file)) {
+        el.append(thumbEl(it, el));
       } else {
         el.append(h('div', { class: 'file-row' }, h('div', { class: 'file-ext', textContent: extOf(it.file.name) }),
           h('div', { class: 'card-sub', textContent: it.file.name })));
@@ -637,6 +639,7 @@
       qa.append(iconBtn('download', '下载', () => downloadItem(it), 'sm'));
       makeDraggable(el, it);
     }
+    if (it.type !== 'file' && thumbSrc(it)) el.append(thumbEl(it, el));
     if (it.attachments && it.attachments.length) {
       el.append(h('div', { class: 'card-att' }, icon('clip'),
         it.attachments.length === 1 ? it.attachments[0].name : `${it.attachments.length} 个附件`));
@@ -817,6 +820,19 @@
       toast('已复制为图片，可以直接粘贴到微信、邮件或其他网站');
     } catch { toast('复制失败，请改用拖拽或下载', false); }
   }
+  // 下载为 PNG 图片（多页 PDF 拼成一张长图）
+  async function exportImage(f, key) {
+    toast(isPdf(f) ? '正在把 PDF 转成图片…' : '正在导出图片…');
+    try {
+      const pages = await pagesOf(f, key);
+      const blob = pages.length === 1 ? pages[0].blob : await canvasBlob(stackCanvases(pages.map((p) => p.canvas)));
+      const url = URL.createObjectURL(blob);
+      const a = h('a', { href: url, download: baseName(f.name) + '.png' });
+      document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      toast(pages.length > 1 ? `已导出图片（${pages.length} 页拼成一张长图）` : '已导出图片');
+    } catch { toast('导出失败', false); }
+  }
   // 最小 PDF 生成器：每页一张 JPEG，居中放在 A4 页面上
   function buildPdf(pages) {
     const te = new TextEncoder();
@@ -898,13 +914,86 @@
       }));
     } catch (x) { pv.replaceChildren(h('p', { class: 'hint', textContent: '无法预览：' + (x.message || '文件可能已损坏或受密码保护') })); }
   }
+  // ---------------- PDF 缩略图（卡片上直接看到第一页） ----------------
+  // 缩略图生成一次后加密保存在卡片里（it.thumb），下次打开直接显示
+  const thumbQueue = [];
+  let thumbBusy = false, thumbSaveT = 0;
+  const thumbIO = new IntersectionObserver((entries) => {
+    for (const e of entries) if (e.isIntersecting) { thumbIO.unobserve(e.target); queueThumb(e.target.dataset.id); }
+  }, { rootMargin: '300px' });
+  function fillThumb(th, t) {
+    th.replaceChildren(...[h('img', { src: t.src, alt: '', draggable: false }),
+      t.pages > 1 ? h('span', { class: 'pg-badge', textContent: `${t.pages} 页` }) : null].filter(Boolean));
+  }
+  function queueThumb(id) { if (id && !thumbQueue.includes(id)) { thumbQueue.push(id); pumpThumbs(); } }
+  // 卡片缩略图的来源：PDF 文件卡片本身，或其他卡片的第一个 PDF/图片附件
+  const thumbSrc = (it) => it.type === 'file' ? (it.file && isPdf(it.file) ? it.file : null) : (it.attachments || []).find(isMedia) || null;
+  const thumbOf = (f) => f.id || 'file';
+  const thumbOk = (it, f) => it.thumb && it.thumb.of === thumbOf(f);
+  function thumbEl(it, card) {
+    const f = thumbSrc(it);
+    const th = h('div', { class: 'thumb pdf' });
+    if (thumbOk(it, f) && it.thumb.src) fillThumb(th, it.thumb);
+    else if (thumbOk(it, f) && it.thumb.failed) th.append(h('div', { class: 'file-ext', textContent: extOf(f.name) }));
+    else { th.append(h('div', { class: 'pv-loading' }, h('i'), '正在生成预览…')); thumbIO.observe(card); }
+    return th;
+  }
+  async function renderThumb(f) {
+    if (isImage(f)) {
+      const bmp = await createImageBitmap(new Blob([C.unb64(f.data)], { type: f.mime }));
+      const s = Math.min(1, 560 / bmp.width);
+      const c = document.createElement('canvas');
+      c.width = Math.round(bmp.width * s); c.height = Math.round(bmp.height * s);
+      const x = c.getContext('2d');
+      x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height); x.drawImage(bmp, 0, 0, c.width, c.height);
+      const blob = await canvasBlob(c, 'image/jpeg', 0.82);
+      return { src: await new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob); }), pages: 1 };
+    }
+    const L = await loadPdfjs();
+    const doc = await L.getDocument({ data: C.unb64(f.data), isEvalSupported: false, cMapUrl: 'lib/pdfjs/cmaps/', cMapPacked: true }).promise;
+    try {
+      const pg = await doc.getPage(1);
+      const v1 = pg.getViewport({ scale: 1 });
+      const vp = pg.getViewport({ scale: 560 / v1.width });
+      const c = document.createElement('canvas');
+      c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
+      const x = c.getContext('2d');
+      x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height);
+      await pg.render({ canvasContext: x, viewport: vp, intent: 'print' }).promise;
+      const blob = await canvasBlob(c, 'image/jpeg', 0.82);
+      const src = await new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob); });
+      return { src, pages: doc.numPages };
+    } finally { doc.destroy(); }
+  }
+  async function pumpThumbs() {
+    if (thumbBusy) return;
+    thumbBusy = true;
+    try {
+      while (thumbQueue.length && S.key) {
+        const it = byId(thumbQueue.shift());
+        const f = it && thumbSrc(it);
+        if (!f || thumbOk(it, f)) continue;
+        try { it.thumb = Object.assign(await renderThumb(f), { of: thumbOf(f) }); } catch { it.thumb = { src: '', failed: true, of: thumbOf(f) }; }
+        if (!S.key) break;
+        const th = document.querySelector(`.card[data-id="${CSS.escape(it.id)}"] .thumb.pdf`);
+        if (th) {
+          if (it.thumb.src) { fillThumb(th, it.thumb); if (motion()) th.firstChild.animate([{ opacity: 0, transform: 'scale(1.04)' }, { opacity: 1, transform: 'none' }], { duration: 450, easing: 'cubic-bezier(.2,.8,.2,1)' }); }
+          else th.replaceChildren(h('div', { class: 'file-ext', textContent: extOf(f.name) }));
+        }
+        clearTimeout(thumbSaveT);
+        thumbSaveT = setTimeout(() => { if (S.key) save(); }, 1500); // 一批生成完再统一加密保存
+      }
+    } finally { thumbBusy = false; }
+  }
+
   // 一个文件（附件或文件卡片）的整行：拖出原文件 + 预览 / 复制为图片 / 导出 PDF / 下载
-  function mediaRow(f, key) {
+  function mediaRow(f, key, autoOpen, onRemove) {
     const pv = h('div', { class: 'att-preview' });
-    let open = false;
+    let open = false, pvBtn = null;
     const toggle = () => {
       open = !open;
       row.classList.toggle('open', open);
+      if (pvBtn) pvBtn.lastChild.textContent = open ? '收起预览' : (isPdf(f) ? '预览 / 拖出页面图片' : '预览');
       if (open) fillPreview(pv, f, key); else pv.replaceChildren();
     };
     const media = isMedia(f);
@@ -912,13 +1001,17 @@
       h('span', { class: 'grip' }, icon('grip')),
       h('div', { class: 'file-ext', textContent: extOf(f.name) }),
       h('div', { class: 'f-main' }, h('div', { class: 'card-title', textContent: f.name }), h('small', { textContent: `${fmtSize(f.size)} · 按住拖出原文件` })),
-      iconBtn('download', '下载原文件', () => downloadF(f, key)));
+      iconBtn('download', '下载原文件', () => downloadF(f, key)),
+      onRemove ? iconBtn('trash', '移除这个附件', onRemove) : null);
     draggableF(row, f, key);
+    pvBtn = media ? h('button', { type: 'button', class: 'btn sm', onclick: toggle }, icon('eye'), h('span', { textContent: isPdf(f) ? '预览 / 拖出页面图片' : '预览' })) : null;
     const tools = media ? h('div', { class: 'media-tools' },
-      h('button', { type: 'button', class: 'btn sm', onclick: toggle }, icon('eye'), isPdf(f) ? '预览 / 拖出页面图片' : '预览'),
-      h('button', { type: 'button', class: 'btn sm', onclick: () => copyAsImage(f, key) }, icon('image'), '复制为图片'),
-      isImage(f) ? h('button', { type: 'button', class: 'btn sm', onclick: () => exportPdf([{ f, key }], baseName(f.name)) }, icon('pdf'), '导出为 PDF') : null,
+      pvBtn,
+      h('button', { type: 'button', class: 'btn sm', onclick: () => copyAsImage(f, key) }, icon('copy'), '复制为图片'),
+      h('button', { type: 'button', class: 'btn sm', onclick: () => exportImage(f, key) }, icon('image'), '导出为图片'),
+      h('button', { type: 'button', class: 'btn sm', onclick: () => isPdf(f) ? downloadF(f, key) : exportPdf([{ f, key }], baseName(f.name)) }, icon('pdf'), '导出为 PDF'),
       isPdf(f) ? h('button', { type: 'button', class: 'btn sm', onclick: () => window.open(blobEntry(f, key).url, '_blank', 'noopener') }, icon('open'), '新标签页打开') : null) : null;
+    if (autoOpen && media) toggle();
     return h('div', { class: 'att' }, row, tools, pv);
   }
 
@@ -944,10 +1037,9 @@
     pick.addEventListener('dragover', (e) => { e.preventDefault(); pick.classList.add('over'); });
     pick.addEventListener('dragleave', () => pick.classList.remove('over'));
     pick.addEventListener('drop', (e) => { e.preventDefault(); e.stopPropagation(); pick.classList.remove('over'); take([...e.dataTransfer.files]); });
-    const rows = it.attachments.map((a) => h('div', { class: 'att-edit' }, h('div', { class: 'file-ext', textContent: extOf(a.name) }),
-      h('div', { class: 'f-main' }, h('div', { class: 'card-title', textContent: a.name }), h('small', { class: 'meta', textContent: fmtSize(a.size) })),
-      iconBtn('trash', '移除', () => { it.attachments = it.attachments.filter((x) => x !== a); renderEditor(); })));
-    return h('div', { class: 'field' }, h('span', { textContent: '附件' }), h('div', { class: 'att-list' }, ...rows, pick));
+    // 编辑时也能拖出、复制、导出已上传的附件
+    const rows = it.attachments.map((a) => mediaRow(a, attKey(a), false, () => { it.attachments = it.attachments.filter((x) => x !== a); renderEditor(); }));
+    return h('div', { class: 'field' }, h('span', { textContent: `附件（PDF / 图片）${it.attachments.length ? ' · ' + it.attachments.length : ''}` }), h('div', { class: 'att-list' }, pick, ...rows));
   }
   async function copyImage(it) {
     try {
@@ -1082,7 +1174,7 @@
     else if ((mime.startsWith('text/') || /\.(txt|md|csv|json|log)$/i.test(it.file.name)) && it.file.size < 200000) {
       box.append(h('div', { class: 'preview' }, h('pre', { textContent: new TextDecoder().decode(C.unb64(it.file.data)) })));
     }
-    box.append(mediaRow(it.file, fileKey(it)));
+    box.append(mediaRow(it.file, fileKey(it), isPdf(it.file))); // PDF 打开即显示全部页面
     return box;
   }
 
@@ -1181,6 +1273,7 @@
       if (!f) return;
       if (f.size > MAX_FILE) { toast(`“${f.name}”超过 25MB`, false); return; }
       it.file = await readFile(f);
+      delete it.thumb; // 换了文件，缩略图重新生成
       if (!it.title) it.title = f.name;
       renderEditor();
     };
@@ -1206,10 +1299,13 @@
     }
     const titleField = inputField('名称', it.title, (v) => { it.title = v; }, { ph: { login: '例如：学校邮箱', identity: '例如：我的护照', bank: '例如：工资卡', note: '例如：租房信息', file: '默认使用文件名' }[it.type] });
     body.append(titleField);
+    const attachFirst = it.type === 'identity'; // 证件：上传扫描件放在最显眼的位置
+    if (TYPES[it.type].attach) it.attachments = it.attachments || [];
+    if (attachFirst) body.append(attachEditor(it));
     if (it.type !== 'file') body.append(iconPicker(it));
     if (it.type === 'file') body.append(filePicker(it));
     for (const f of TYPES[it.type].fields) body.append(f.secret ? secretField(it, f) : inputField(f.l, it.fields[f.k], (v) => { it.fields[f.k] = v; }, { ph: f.ph }));
-    if (TYPES[it.type].attach) { it.attachments = it.attachments || []; body.append(attachEditor(it)); }
+    if (TYPES[it.type].attach && !attachFirst) body.append(attachEditor(it));
     body.append(h('div', { class: 'field' }, h('span', { textContent: '标签' }),
       chipEditor(() => it.tags, (l) => { it.tags = l; }, (g) => '#' + g, (v) => v.replace(/^[#\s]+/, '').trim(), '输入后按回车', 'dl-tags')));
     body.append(h('div', { class: 'field' }, h('span', { textContent: '关联卡片' }),
