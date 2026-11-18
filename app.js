@@ -154,13 +154,53 @@
           it.type === 'login' ? h('button', { type: 'button', class: 'btn sm', onclick: fromUrl }, '从网址获取') : null,
           h('button', { type: 'button', class: 'btn sm', onclick: () => input.click() }, '上传图片'),
           it.icon ? h('button', { type: 'button', class: 'btn sm danger', onclick: () => { delete it.icon; renderEditor(); } }, '移除') : null),
-        status.textContent ? status : h('small', { class: 'meta', textContent: '也可以点这里后按 Ctrl+V 粘贴 logo 截图' }), status),
+        h('small', { class: 'meta', textContent: '把 logo 图片拖到这里（电脑里的文件或网页上的图片都行），也可以点这里后按 Ctrl+V 粘贴' }), status),
       input);
     box.addEventListener('paste', async (e) => {
       const f = [...(e.clipboardData && e.clipboardData.files || [])].find((x) => x.type.startsWith('image/'));
       if (f) { e.preventDefault(); set(await iconFromBlob(f)); }
     });
+    // 拖入：电脑里的图片文件，或从其他网页直接拖来的图片
+    dropTarget(box, async (dt) => {
+      const f = [...dt.files].find((x) => x.type.startsWith('image/'));
+      if (f) { set(await iconFromBlob(f)); return; }
+      const src = imageUrlFrom(dt);
+      if (!src) { status.textContent = '没有识别到图片，换一张试试，或者下载后再拖进来'; return; }
+      status.textContent = '正在读取图片…';
+      const a = await loadImg(src, true);
+      if (a) { try { set({ kind: 'data', src: toIconData(a) }); return; } catch { /* 无 CORS */ } }
+      const b = await loadImg(src, false);
+      if (b) set({ kind: 'url', src }); else status.textContent = '这张图片无法读取，可以先保存到电脑再拖进来';
+    }, { any: true });
     return h('div', { class: 'field' }, h('span', { textContent: '图标' }), box);
+  }
+  // 从网页拖来的内容里找图片地址（只接受 https）
+  function imageUrlFrom(dt) {
+    const html = dt.getData('text/html');
+    if (html) {
+      const m = /<img[^>]+src=["']([^"']+)["']/i.exec(html);
+      if (m && /^https:\/\//i.test(m[1])) return m[1];
+    }
+    const u = (dt.getData('text/uri-list') || dt.getData('text/plain') || '').split(/\r?\n/).find((l) => l && l[0] !== '#');
+    return u && /^https:\/\//i.test(u.trim()) ? u.trim() : null;
+  }
+  // 通用拖放区域：自己处理 dragover，避免被整页的拖放逻辑拦截
+  function dropTarget(el, onDrop, o = {}) {
+    const ok = (e) => o.any || [...e.dataTransfer.types].includes('Files');
+    el.addEventListener('dragenter', (e) => { if (S.dragOut || !ok(e)) return; e.preventDefault(); e.stopPropagation(); el.classList.add('over'); });
+    el.addEventListener('dragover', (e) => {
+      if (S.dragOut || !ok(e)) return;
+      e.preventDefault(); e.stopPropagation();
+      e.dataTransfer.dropEffect = 'copy';
+      el.classList.add('over');
+    });
+    el.addEventListener('dragleave', (e) => { if (!el.contains(e.relatedTarget)) el.classList.remove('over'); });
+    el.addEventListener('drop', (e) => {
+      if (S.dragOut || !ok(e)) return;
+      e.preventDefault(); e.stopPropagation();
+      el.classList.remove('over');
+      onDrop(e.dataTransfer);
+    });
   }
   const iconBtn = (name, title, fn, cls = '') => h('button', { type: 'button', class: 'icon-btn ' + cls, title, 'aria-label': title,
     onclick: (e) => { e.stopPropagation(); fn(e); } }, icon(name));
@@ -1034,9 +1074,7 @@
     input.addEventListener('change', () => take([...input.files]));
     const pick = h('div', { class: 'file-pick', onclick: () => input.click() }, h('span', { class: 'grip' }, icon('clip')),
       h('div', { class: 'f-main' }, h('div', { class: 'card-title', textContent: '添加 PDF 或图片' }), h('small', { class: 'meta', textContent: '点击选择，或把文件拖到这里 · 单个最大 25MB' })), input);
-    pick.addEventListener('dragover', (e) => { e.preventDefault(); pick.classList.add('over'); });
-    pick.addEventListener('dragleave', () => pick.classList.remove('over'));
-    pick.addEventListener('drop', (e) => { e.preventDefault(); e.stopPropagation(); pick.classList.remove('over'); take([...e.dataTransfer.files]); });
+    dropTarget(pick, (dt) => take([...dt.files]));
     // 编辑时也能拖出、复制、导出已上传的附件
     const rows = it.attachments.map((a) => mediaRow(a, attKey(a), false, () => { it.attachments = it.attachments.filter((x) => x !== a); renderEditor(); }));
     return h('div', { class: 'field' }, h('span', { textContent: `附件（PDF / 图片）${it.attachments.length ? ' · ' + it.attachments.length : ''}` }), h('div', { class: 'att-list' }, pick, ...rows));
@@ -1278,9 +1316,7 @@
       renderEditor();
     };
     input.addEventListener('change', () => take(input.files[0]));
-    box.addEventListener('dragover', (e) => { e.preventDefault(); box.classList.add('over'); });
-    box.addEventListener('dragleave', () => box.classList.remove('over'));
-    box.addEventListener('drop', (e) => { e.preventDefault(); e.stopPropagation(); box.classList.remove('over'); take(e.dataTransfer.files[0]); });
+    dropTarget(box, (dt) => take(dt.files[0]));
     return h('div', { class: 'field' }, h('span', { textContent: '文件' }), box);
   }
 

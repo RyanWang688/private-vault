@@ -406,6 +406,8 @@ details.sub[open] summary { margin-bottom: 12px; }
 .badge-ic.has-img + .card-titles { padding-left: 0; }
 .card .badge-ic.has-img { animation: pop .4s var(--spring); }
 .icon-pick { display: flex; align-items: center; gap: 14px; padding: 12px; border: 1.5px dashed var(--line-strong); border-radius: 14px; outline: none; transition: border-color .2s, background .2s; }
+.icon-pick.over { border-color: var(--accent); border-style: solid; background: color-mix(in srgb, var(--accent) 12%, transparent); transform: scale(1.01); }
+.icon-pick { transition: border-color .2s, background .2s, transform .2s var(--ease); }
 .icon-pick:focus, .icon-pick:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 5%, transparent); }
 .icon-pick .badge-ic { width: 48px; height: 48px; border-radius: 13px; }
 .row.tight { margin: 0 0 6px; gap: 6px; }
