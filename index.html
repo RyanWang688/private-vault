@@ -7,7 +7,7 @@
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data: https:; connect-src 'self'; frame-src blob:; worker-src 'self'; font-src 'self' data: blob:; form-action 'none'; base-uri 'none'">
 <title>私人保险箱</title>
-<link rel="stylesheet" href="style.css?v=8">
+<link rel="stylesheet" href="style.css?v=9">
 </head>
 <body>
 <div id="bg" aria-hidden="true"></div>
@@ -72,7 +72,7 @@
       <p class="error" id="setup-err" role="alert"></p>
       <div class="auth-alt">
         <span>已经有加密文件？</span>
-        <label class="link">导入 vault.json<input type="file" id="setup-import" accept=".json,application/json" hidden></label>
+        <label class="link">导入 vault.json 或同步包<input type="file" id="setup-import" accept=".json,.zip,application/json,application/zip" hidden></label>
       </div>
     </form>
 
@@ -111,7 +111,7 @@
       <nav class="nav tags" id="nav-tags" aria-label="标签"></nav>
     </div>
     <div class="storage" id="storage">
-      <div class="storage-row"><span>可同步容量</span><span id="storage-text"></span></div>
+      <div class="storage-row"><span>已用容量</span><span id="storage-text"></span></div>
       <div class="meter small"><i id="storage-bar"></i></div>
     </div>
   </aside>
@@ -248,10 +248,11 @@
     <p class="error" id="set-err" role="alert"></p>
 
     <h3>同步到 GitHub</h3>
-    <p class="hint">修改保存在本设备浏览器里（已加密）。点“导出”下载 <code>vault.json</code>，替换仓库里的同名文件并提交，其他设备就能看到最新内容。</p>
+    <p class="hint">修改保存在本设备浏览器里（已加密）。“同步包”是一个 zip，只包含文字信息和<b>新增</b>的文件，交给仓库后其他设备就能看到最新内容。“完整备份”包含全部文件，可以离线保存，或在新设备上直接导入。</p>
     <div class="row wrap">
-      <button type="button" class="btn primary" id="set-export">导出 vault.json</button>
-      <label class="btn">从文件导入<input type="file" id="set-import" accept=".json,application/json" hidden></label>
+      <button type="button" class="btn primary" id="set-export">导出同步包</button>
+      <button type="button" class="btn" id="set-backup">导出完整备份</button>
+      <label class="btn">从文件导入<input type="file" id="set-import" accept=".json,.zip,application/json,application/zip" hidden></label>
       <button type="button" class="btn" id="set-reload">改用 GitHub 上的版本</button>
     </div>
   </form>
@@ -332,8 +333,8 @@
     <circle class="p" cx="86" cy="116" r="7"/><circle class="a2" cx="146" cy="106" r="9"/><circle class="p" cx="50" cy="100" r="6"/></svg>
 </template>
 
-<script src="crypto.js?v=8"></script>
-<script src="graph.js?v=8"></script>
-<script src="app.js?v=8"></script>
+<script src="crypto.js?v=9"></script>
+<script src="graph.js?v=9"></script>
+<script src="app.js?v=9"></script>
 </body>
 </html>

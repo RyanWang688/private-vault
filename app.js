@@ -10,8 +10,8 @@
   const motion = () => !matchMedia('(prefers-reduced-motion: reduce)').matches;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const now = () => new Date().toISOString();
-  const MAX_FILE = 25 * 1048576;
-  const SYNC_LIMIT = 70 * 1048576;
+  const MAX_FILE = 90 * 1048576; // GitHub 单文件上限 100MB
+  const SYNC_LIMIT = 1024 * 1048576; // GitHub 仓库建议总大小
 
   // ---------------- 图标 ----------------
   const ICONS = {
@@ -288,7 +288,127 @@
     await setLocal('dirty', true);
     S.dirty = true;
     updateSync();
+    gcBlobs().catch(() => {});
   }
+
+  // ================= 文件分开存储 =================
+  // 每个文件用随机“数据密钥”(data.dek，锁在 vault.json 里) 单独加密，存为 blobs/<随机编号>.bin
+  // 本地缓存在 IndexedDB 的 'blob:<id>'（同样是密文）；'pending' 记录还没导出到 GitHub 的编号
+  const te = new TextEncoder();
+  const validId = (id) => typeof id === 'string' && /^[A-Za-z0-9]{6,40}$/.test(id);
+  function ensureDek() { if (!S.data.dek) S.data.dek = C.b64(C.rand(32)); }
+  async function dekKey() {
+    if (!S.dek) S.dek = await crypto.subtle.importKey('raw', C.unb64(S.data.dek), { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+    return S.dek;
+  }
+  const blobAad = (id) => te.encode('pv-blob:' + id);
+  async function putBlob(bytes) {
+    ensureDek();
+    const id = uid(), iv = C.rand(12);
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: blobAad(id) }, await dekKey(), bytes));
+    const out = new Uint8Array(12 + ct.length);
+    out.set(iv); out.set(ct, 12);
+    await setLocal('blob:' + id, out.buffer);
+    const pend = (await getLocal('pending')) || [];
+    pend.push(id);
+    await setLocal('pending', pend);
+    return id;
+  }
+  async function rawBlob(id) {
+    if (!validId(id)) throw new Error('文件编号无效');
+    let buf = await getLocal('blob:' + id);
+    if (!buf) {
+      const r = await fetch(`blobs/${id}.bin`, { cache: 'no-store' });
+      if (!r.ok) throw new Error('这个文件还没有同步到 GitHub，请在原来的设备上导出同步包');
+      buf = await r.arrayBuffer();
+      await setLocal('blob:' + id, buf);
+    }
+    return buf;
+  }
+  async function bytesOf(f) {
+    if (f.data) return C.unb64(f.data); // 旧格式（迁移前）
+    const u = new Uint8Array(await rawBlob(f.blob));
+    return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: u.subarray(0, 12), additionalData: blobAad(f.blob) }, await dekKey(), u.subarray(12)));
+  }
+  function blobRefs(data, extra) {
+    const refs = new Set();
+    const add = (it) => { if (!it) return; if (it.file && it.file.blob) refs.add(it.file.blob); for (const a of it.attachments || []) if (a.blob) refs.add(a.blob); };
+    for (const it of data.items) add(it);
+    add(extra);
+    return refs;
+  }
+  // 删除本地已不再被任何卡片（或正在编辑的草稿）引用的文件
+  async function gcBlobs() {
+    if (!S.data) return;
+    const refs = blobRefs(S.data, S.drawer && S.drawer.draft);
+    const keys = await idb('readonly', (s) => s.getAllKeys());
+    for (const k of keys || []) if (typeof k === 'string' && k.startsWith('blob:') && !refs.has(k.slice(5))) await delLocal(k);
+    const pend = (await getLocal('pending')) || [];
+    const keep = pend.filter((id) => refs.has(id));
+    if (keep.length !== pend.length) await setLocal('pending', keep);
+  }
+  // 旧版：文件内容直接放在 vault.json 里 → 拆成单独加密的文件
+  async function migrateBlobs() {
+    const recs = [];
+    for (const it of S.data.items) {
+      if (it.file && it.file.data) recs.push(it.file);
+      for (const a of it.attachments || []) if (a.data) recs.push(a);
+    }
+    if (!recs.length) return 0;
+    for (const r of recs) { r.blob = await putBlob(C.unb64(r.data)); delete r.data; }
+    await save();
+    return recs.length;
+  }
+  function totalBytes() {
+    let n = S.env ? S.env.ct.length : 0;
+    for (const it of S.data.items) { if (it.file) n += it.file.size || 0; for (const a of it.attachments || []) n += a.size || 0; }
+    return n;
+  }
+
+  // ---------------- 同步包（zip，不压缩） ----------------
+  const CRC_T = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+  function crc32(u) { let c = 0xFFFFFFFF; for (let i = 0; i < u.length; i++) c = CRC_T[(c ^ u[i]) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+  function buildZip(files) {
+    const parts = [], central = [];
+    let off = 0;
+    for (const f of files) {
+      const name = te.encode(f.name), crc = crc32(f.data), len = f.data.length;
+      const lh = new DataView(new ArrayBuffer(30));
+      lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true); lh.setUint16(12, 0x21, true);
+      lh.setUint32(14, crc, true); lh.setUint32(18, len, true); lh.setUint32(22, len, true); lh.setUint16(26, name.length, true);
+      parts.push(new Uint8Array(lh.buffer), name, f.data);
+      const ch = new DataView(new ArrayBuffer(46));
+      ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint16(8, 0x0800, true); ch.setUint16(14, 0x21, true);
+      ch.setUint32(16, crc, true); ch.setUint32(20, len, true); ch.setUint32(24, len, true); ch.setUint16(28, name.length, true); ch.setUint32(42, off, true);
+      central.push(new Uint8Array(ch.buffer), name);
+      off += 30 + name.length + len;
+    }
+    const cd = central.reduce((s, p) => s + p.length, 0);
+    const end = new DataView(new ArrayBuffer(22));
+    end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true); end.setUint16(10, files.length, true);
+    end.setUint32(12, cd, true); end.setUint32(16, off, true);
+    return new Blob([...parts, ...central, new Uint8Array(end.buffer)], { type: 'application/zip' });
+  }
+  function readZip(buf) {
+    const u = new Uint8Array(buf), v = new DataView(buf), out = new Map(), td = new TextDecoder();
+    let e = u.length - 22;
+    while (e >= 0 && v.getUint32(e, true) !== 0x06054b50) e--;
+    if (e < 0) throw new Error('不是有效的同步包');
+    let p = v.getUint32(e + 16, true);
+    const n = v.getUint16(e + 10, true);
+    for (let i = 0; i < n; i++) {
+      if (v.getUint32(p, true) !== 0x02014b50) throw new Error('同步包已损坏');
+      const method = v.getUint16(p + 10, true), size = v.getUint32(p + 20, true);
+      const nl = v.getUint16(p + 28, true), xl = v.getUint16(p + 30, true), cl = v.getUint16(p + 32, true), lo = v.getUint32(p + 42, true);
+      const name = td.decode(u.subarray(p + 46, p + 46 + nl));
+      if (method !== 0) throw new Error('不支持压缩过的 zip，请直接导入网站导出的同步包');
+      const start = lo + 30 + v.getUint16(lo + 26, true) + v.getUint16(lo + 28, true);
+      out.set(name, u.subarray(start, start + size));
+      p += 46 + nl + xl + cl;
+    }
+    return out;
+  }
+  function stamp() { const d = new Date(), z = (x) => String(x).padStart(2, '0'); return `${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}-${z(d.getHours())}${z(d.getMinutes())}`; }
   async function rekey(pw, rotate) {
     if (rotate || !S.secret) {
       S.secret = C.newSecret();
@@ -425,9 +545,12 @@
     } else {
       await rekey(pw, true); // 旧版保险箱升级：加入秘密钥匙
     }
+    btn.textContent = '正在整理文件…';
+    const moved = await migrateBlobs(); // 旧版：把文件从 vault.json 拆出来单独加密
     btn.disabled = false; btn.textContent = '解锁'; art.classList.remove('deriving');
     await enterApp();
     if (env.v !== 2) { showKit(true); toast('保险箱已升级为“主密码 + 秘密钥匙”双重加密'); }
+    if (moved) toast(`已把 ${moved} 个文件改为单独加密存储，请点“未同步”导出同步包`);
   });
 
   async function enterApp() {
@@ -444,7 +567,7 @@
   }
 
   function lock(msg) {
-    S.key = null; S.data = null; S.hdr = null;
+    S.key = null; S.data = null; S.hdr = null; S.dek = null;
     for (const u of S.urls.values()) URL.revokeObjectURL(u.url);
     S.urls.clear();
     for (const p of S.pages.values()) p.then((list) => list.forEach((x) => { URL.revokeObjectURL(x.url); x.canvas.width = x.canvas.height = 0; })).catch(() => {});
@@ -584,10 +707,11 @@
       h('span', { class: 'hash', textContent: '#' }), g, h('span', { class: 'n', textContent: n }))));
     $('#dl-tags').replaceChildren(...tags.map(([g]) => h('option', { value: g })));
     $('#dl-items').replaceChildren(...items.map((i) => h('option', { value: i.title || '' })));
-    const used = S.env ? S.env.ct.length : 0;
-    $('#storage-text').textContent = `${fmtSize(used)} / 70 MB`;
+    // 文件已分开存储：只受 GitHub 仓库建议上限（约 1 GB）约束
+    const used = totalBytes();
+    $('#storage-text').textContent = `${fmtSize(used)} / 1 GB`;
     const bar = $('#storage-bar');
-    bar.style.width = Math.min(100, used / SYNC_LIMIT * 100) + '%';
+    bar.style.width = Math.max(1, Math.min(100, used / SYNC_LIMIT * 100)) + '%';
     bar.className = used > SYNC_LIMIT * 0.9 ? '' : used > SYNC_LIMIT * 0.6 ? 'l2' : 'l4';
   }
 
@@ -667,10 +791,8 @@
       if (it.note) el.append(h('div', { class: 'card-note', textContent: it.note.replace(/\[\[([^\]]+)\]\]/g, '$1') }));
       if (it.note) qa.append(copyBtn(it.note, '内容', false));
     } else if (it.type === 'file' && it.file) {
-      if ((it.file.mime || '').startsWith('image/')) {
-        el.append(h('div', { class: 'thumb' }, h('img', { src: fileURL(it), alt: '', loading: 'lazy', draggable: false })));
-      } else if (isPdf(it.file)) {
-        el.append(thumbEl(it, el));
+      if (isMedia(it.file)) {
+        el.append(thumbEl(it, el)); // 图片和 PDF 都用加密保存的缩略图，不必先下载原文件
       } else {
         el.append(h('div', { class: 'file-row' }, h('div', { class: 'file-ext', textContent: extOf(it.file.name) }),
           h('div', { class: 'card-sub', textContent: it.file.name })));
@@ -740,29 +862,49 @@
   }
 
   // ---------------- 文件 ----------------
-  // f = { name, mime, size, data }；key 用于缓存解密后的 Blob（锁定时全部释放）
-  function blobEntry(f, key) {
-    let c = S.urls.get(key);
-    if (c) return c;
-    const blob = new Blob([C.unb64(f.data)], { type: f.mime || 'application/octet-stream' });
-    c = { blob, url: URL.createObjectURL(blob) };
-    S.urls.set(key, c);
-    return c;
+  // f = { name, mime, size, blob(编号) }；解密后的 Blob 缓存到锁定为止
+  const bkey = (f) => f.blob ? 'b:' + f.blob : 'd:' + f.name + ':' + f.size;
+  const blobLoads = new Map();
+  function blobEntry(f) {
+    const k = bkey(f);
+    const c = S.urls.get(k);
+    if (c) return Promise.resolve(c);
+    if (blobLoads.has(k)) return blobLoads.get(k);
+    const p = (async () => {
+      const blob = new Blob([await bytesOf(f)], { type: f.mime || 'application/octet-stream' });
+      const e = { blob, url: URL.createObjectURL(blob) };
+      if (S.key) S.urls.set(k, e);
+      return e;
+    })();
+    blobLoads.set(k, p);
+    p.finally(() => blobLoads.delete(k)).catch(() => {});
+    return p;
   }
-  const fileKey = (it) => it.id + ':' + it.updated;
+  const cachedEntry = (f) => S.urls.get(bkey(f));
+  const fileKey = (it) => it.id;
   const attKey = (a) => 'att:' + a.id;
-  const fileEntry = (it) => blobEntry(it.file, fileKey(it));
-  const fileURL = (it) => fileEntry(it).url;
-  function downloadF(f, key) {
-    const a = h('a', { href: blobEntry(f, key).url, download: f.name });
-    document.body.append(a); a.click(); a.remove();
+  async function downloadF(f) {
+    try {
+      const c = await blobEntry(f);
+      const a = h('a', { href: c.url, download: f.name });
+      document.body.append(a); a.click(); a.remove();
+    } catch (x) { toast(x.message || '下载失败', false); }
   }
-  const downloadItem = (it) => downloadF(it.file, fileKey(it));
-  function draggableF(el, f, key) {
+  const downloadItem = (it) => downloadF(it.file);
+  async function openInTab(f) {
+    try { const c = await blobEntry(f); window.open(c.url, '_blank', 'noopener'); }
+    catch (x) { toast(x.message || '打开失败', false); }
+  }
+  function draggableF(el, f) {
     el.draggable = true;
+    // 拖动开始时必须立刻给出文件，所以鼠标移上去 / 按下时就提前解密好
+    const warm = () => { blobEntry(f).catch(() => {}); };
+    el.addEventListener('pointerenter', warm);
+    el.addEventListener('pointerdown', warm);
     el.addEventListener('dragstart', (e) => {
+      const c = cachedEntry(f);
+      if (!c) { e.preventDefault(); warm(); toast('文件还在准备中，请稍等一秒再拖', false); return; }
       S.dragOut = true;
-      const c = blobEntry(f, key);
       const name = f.name.replace(/[:\r\n]/g, '_');
       const mime = f.mime || 'application/octet-stream';
       const dt = e.dataTransfer;
@@ -774,7 +916,7 @@
     });
     el.addEventListener('dragend', () => { S.dragOut = false; el.classList.remove('dragging'); });
   }
-  const makeDraggable = (el, it) => draggableF(el, it.file, fileKey(it));
+  const makeDraggable = (el, it) => draggableF(el, it.file);
   const isPdf = (f) => f.mime === 'application/pdf' || /\.pdf$/i.test(f.name);
 
   // ---------------- PDF / 图片：渲染、复制为图片、拖出图片、导出 PDF ----------------
@@ -794,14 +936,14 @@
   }
   const canvasBlob = (c, type = 'image/png', q) => new Promise((r) => c.toBlob(r, type, q));
   // 返回该文件每一页的 { canvas, blob(png), url }；结果缓存到锁定为止
-  function pagesOf(f, key) {
-    const k = 'pages:' + key;
+  function pagesOf(f) {
+    const k = 'pages:' + bkey(f);
     if (S.pages.has(k)) return S.pages.get(k);
     const p = (async () => {
       const canvases = [];
       if (isPdf(f)) {
         const L = await loadPdfjs();
-        const doc = await L.getDocument({ data: C.unb64(f.data), isEvalSupported: false, cMapUrl: 'lib/pdfjs/cmaps/', cMapPacked: true }).promise;
+        const doc = await L.getDocument({ data: await bytesOf(f), isEvalSupported: false, cMapUrl: 'lib/pdfjs/cmaps/', cMapPacked: true }).promise;
         const n = Math.min(doc.numPages, 40);
         for (let i = 1; i <= n; i++) {
           const pg = await doc.getPage(i);
@@ -817,7 +959,7 @@
         if (doc.numPages > n) toast(`PDF 共 ${doc.numPages} 页，只处理前 ${n} 页`, false);
         doc.destroy();
       } else {
-        const bmp = await createImageBitmap(blobEntry(f, key).blob);
+        const bmp = await createImageBitmap((await blobEntry(f)).blob);
         const s = Math.min(1, 4000 / Math.max(bmp.width, bmp.height));
         const c = document.createElement('canvas');
         c.width = Math.round(bmp.width * s); c.height = Math.round(bmp.height * s);
@@ -967,7 +1109,7 @@
   }
   function queueThumb(id) { if (id && !thumbQueue.includes(id)) { thumbQueue.push(id); pumpThumbs(); } }
   // 卡片缩略图的来源：PDF 文件卡片本身，或其他卡片的第一个 PDF/图片附件
-  const thumbSrc = (it) => it.type === 'file' ? (it.file && isPdf(it.file) ? it.file : null) : (it.attachments || []).find(isMedia) || null;
+  const thumbSrc = (it) => it.type === 'file' ? (it.file && isMedia(it.file) ? it.file : null) : (it.attachments || []).find(isMedia) || null;
   const thumbOf = (f) => f.id || 'file';
   const thumbOk = (it, f) => it.thumb && it.thumb.of === thumbOf(f);
   function thumbEl(it, card) {
@@ -980,7 +1122,7 @@
   }
   async function renderThumb(f) {
     if (isImage(f)) {
-      const bmp = await createImageBitmap(new Blob([C.unb64(f.data)], { type: f.mime }));
+      const bmp = await createImageBitmap(new Blob([await bytesOf(f)], { type: f.mime }));
       const s = Math.min(1, 560 / bmp.width);
       const c = document.createElement('canvas');
       c.width = Math.round(bmp.width * s); c.height = Math.round(bmp.height * s);
@@ -990,7 +1132,7 @@
       return { src: await new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob); }), pages: 1 };
     }
     const L = await loadPdfjs();
-    const doc = await L.getDocument({ data: C.unb64(f.data), isEvalSupported: false, cMapUrl: 'lib/pdfjs/cmaps/', cMapPacked: true }).promise;
+    const doc = await L.getDocument({ data: await bytesOf(f), isEvalSupported: false, cMapUrl: 'lib/pdfjs/cmaps/', cMapPacked: true }).promise;
     try {
       const pg = await doc.getPage(1);
       const v1 = pg.getViewport({ scale: 1 });
@@ -1041,16 +1183,16 @@
       h('span', { class: 'grip' }, icon('grip')),
       h('div', { class: 'file-ext', textContent: extOf(f.name) }),
       h('div', { class: 'f-main' }, h('div', { class: 'card-title', textContent: f.name }), h('small', { textContent: `${fmtSize(f.size)} · 按住拖出原文件` })),
-      iconBtn('download', '下载原文件', () => downloadF(f, key)),
+      iconBtn('download', '下载原文件', () => downloadF(f)),
       onRemove ? iconBtn('trash', '移除这个附件', onRemove) : null);
-    draggableF(row, f, key);
+    draggableF(row, f);
     pvBtn = media ? h('button', { type: 'button', class: 'btn sm', onclick: toggle }, icon('eye'), h('span', { textContent: isPdf(f) ? '预览 / 拖出页面图片' : '预览' })) : null;
     const tools = media ? h('div', { class: 'media-tools' },
       pvBtn,
       h('button', { type: 'button', class: 'btn sm', onclick: () => copyAsImage(f, key) }, icon('copy'), '复制为图片'),
       h('button', { type: 'button', class: 'btn sm', onclick: () => exportImage(f, key) }, icon('image'), '导出为图片'),
-      h('button', { type: 'button', class: 'btn sm', onclick: () => isPdf(f) ? downloadF(f, key) : exportPdf([{ f, key }], baseName(f.name)) }, icon('pdf'), '导出为 PDF'),
-      isPdf(f) ? h('button', { type: 'button', class: 'btn sm', onclick: () => window.open(blobEntry(f, key).url, '_blank', 'noopener') }, icon('open'), '新标签页打开') : null) : null;
+      h('button', { type: 'button', class: 'btn sm', onclick: () => isPdf(f) ? downloadF(f) : exportPdf([{ f, key }], baseName(f.name)) }, icon('pdf'), '导出为 PDF'),
+      isPdf(f) ? h('button', { type: 'button', class: 'btn sm', onclick: () => openInTab(f) }, icon('open'), '新标签页打开') : null) : null;
     if (autoOpen && media) toggle();
     return h('div', { class: 'att' }, row, tools, pv);
   }
@@ -1066,40 +1208,28 @@
     const input = h('input', { type: 'file', accept: '.pdf,application/pdf,image/*', multiple: true, hidden: true });
     const take = async (files) => {
       for (const f of files) {
-        if (f.size > MAX_FILE) { toast(`“${f.name}”超过 25MB，已跳过`, false); continue; }
+        if (f.size > MAX_FILE) { toast(`“${f.name}”超过 90MB，已跳过`, false); continue; }
         it.attachments.push(Object.assign({ id: uid() }, await readFile(f)));
       }
       renderEditor();
     };
     input.addEventListener('change', () => take([...input.files]));
     const pick = h('div', { class: 'file-pick', onclick: () => input.click() }, h('span', { class: 'grip' }, icon('clip')),
-      h('div', { class: 'f-main' }, h('div', { class: 'card-title', textContent: '添加 PDF 或图片' }), h('small', { class: 'meta', textContent: '点击选择，或把文件拖到这里 · 单个最大 25MB' })), input);
+      h('div', { class: 'f-main' }, h('div', { class: 'card-title', textContent: '添加 PDF 或图片' }), h('small', { class: 'meta', textContent: '点击选择，或把文件拖到这里 · 单个最大 90MB' })), input);
     dropTarget(pick, (dt) => take([...dt.files]));
     // 编辑时也能拖出、复制、导出已上传的附件
     const rows = it.attachments.map((a) => mediaRow(a, attKey(a), false, () => { it.attachments = it.attachments.filter((x) => x !== a); renderEditor(); }));
     return h('div', { class: 'field' }, h('span', { textContent: `附件（PDF / 图片）${it.attachments.length ? ' · ' + it.attachments.length : ''}` }), h('div', { class: 'att-list' }, pick, ...rows));
   }
-  async function copyImage(it) {
-    try {
-      let blob = fileEntry(it).blob;
-      if (it.file.mime !== 'image/png') {
-        const bmp = await createImageBitmap(blob);
-        const cv = document.createElement('canvas'); cv.width = bmp.width; cv.height = bmp.height;
-        cv.getContext('2d').drawImage(bmp, 0, 0);
-        blob = await new Promise((r) => cv.toBlob(r, 'image/png'));
-      }
-      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-      toast('图片已复制，可以直接粘贴到其他网站');
-    } catch { toast('复制失败，请改用拖拽或下载', false); }
-  }
+  // 新文件：立即单独加密存入本地，卡片里只记编号
   async function readFile(f) {
-    return { name: f.name, mime: f.type || 'application/octet-stream', size: f.size, data: C.b64(await f.arrayBuffer()) };
+    return { name: f.name, mime: f.type || 'application/octet-stream', size: f.size, blob: await putBlob(await f.arrayBuffer()) };
   }
   async function addFiles(files) {
     if (!S.key || !files.length) return;
     const added = [];
     for (const f of files) {
-      if (f.size > MAX_FILE) { toast(`“${f.name}”超过 25MB，已跳过`, false); continue; }
+      if (f.size > MAX_FILE) { toast(`“${f.name}”超过 90MB，已跳过`, false); continue; }
       const it = newItem('file');
       it.title = f.name;
       it.file = await readFile(f);
@@ -1113,7 +1243,6 @@
     if (S.filter.kind === 'fav' || (S.filter.kind === 'type' && S.filter.value !== 'file')) S.filter = { kind: 'all' };
     render();
     toast(`已加密保存 ${added.length} 个文件`);
-    if (S.env.ct.length > SYNC_LIMIT) toast('总容量已超过可同步上限（70MB），导出的文件可能无法上传到 GitHub', false);
   }
   $('#file-input').addEventListener('change', (e) => { addFiles([...e.target.files]); e.target.value = ''; });
 
@@ -1208,11 +1337,12 @@
   function fileSection(it) {
     const box = sec(null);
     const mime = it.file.mime || '';
-    if (mime.startsWith('image/')) box.append(h('div', { class: 'preview' }, h('img', { src: fileURL(it), alt: it.file.name, draggable: false })));
-    else if ((mime.startsWith('text/') || /\.(txt|md|csv|json|log)$/i.test(it.file.name)) && it.file.size < 200000) {
-      box.append(h('div', { class: 'preview' }, h('pre', { textContent: new TextDecoder().decode(C.unb64(it.file.data)) })));
+    if ((mime.startsWith('text/') || /\.(txt|md|csv|json|log)$/i.test(it.file.name)) && it.file.size < 200000) {
+      const pre = h('pre', { textContent: '正在读取…' });
+      bytesOf(it.file).then((b) => { pre.textContent = new TextDecoder().decode(b); }).catch((x) => { pre.textContent = x.message; });
+      box.append(h('div', { class: 'preview' }, pre));
     }
-    box.append(mediaRow(it.file, fileKey(it), isPdf(it.file))); // PDF 打开即显示全部页面
+    box.append(mediaRow(it.file, fileKey(it), isMedia(it.file))); // 图片 / PDF 打开即显示
     return box;
   }
 
@@ -1309,7 +1439,7 @@
         h('small', { class: 'meta', textContent: it.file ? fmtSize(it.file.size) + ' · 点击可替换' : '单个文件最大 25MB' })), input);
     const take = async (f) => {
       if (!f) return;
-      if (f.size > MAX_FILE) { toast(`“${f.name}”超过 25MB`, false); return; }
+      if (f.size > MAX_FILE) { toast(`“${f.name}”超过 90MB`, false); return; }
       it.file = await readFile(f);
       delete it.thumb; // 换了文件，缩略图重新生成
       if (!it.title) it.title = f.name;
@@ -1491,24 +1621,50 @@
 
   // ================= 同步 / 设置 =================
   function updateSync() { $('#sync-pill').hidden = !S.dirty; }
-  function exportFile() {
-    if (!S.env) return;
-    const a = h('a', { href: URL.createObjectURL(new Blob([JSON.stringify(S.env)], { type: 'application/json' })), download: 'vault.json' });
-    document.body.append(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
-    setLocal('dirty', false); S.dirty = false; updateSync();
-    toast('已下载 vault.json，替换到 GitHub 仓库后提交即可同步');
+  // 同步包：vault.json（文字信息）+ manifest.json（全部文件编号）+ 新增的加密文件
+  // full=true 时包含全部文件，可作为完整备份
+  async function exportSync(full) {
+    if (!S.env || !S.data) return;
+    toast(full ? '正在打包完整备份…' : '正在打包同步包…');
+    try {
+      const refs = blobRefs(S.data);
+      const pend = new Set((await getLocal('pending')) || []);
+      const ids = full ? [...refs] : [...refs].filter((id) => pend.has(id));
+      const files = [
+        { name: 'vault.json', data: te.encode(JSON.stringify(S.env)) },
+        { name: 'manifest.json', data: te.encode(JSON.stringify({ format: 'private-vault-sync/1', created: now(), full: !!full, blobs: [...refs].sort() }, null, 1)) },
+      ];
+      for (const id of ids) files.push({ name: `blobs/${id}.bin`, data: new Uint8Array(await rawBlob(id)) });
+      const zip = buildZip(files);
+      const a = h('a', { href: URL.createObjectURL(zip), download: `${full ? 'vault-backup' : 'vault-sync'}-${stamp()}.zip` });
+      document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      await setLocal('pending', []);
+      await setLocal('dirty', false); S.dirty = false; updateSync();
+      toast(`已导出${full ? '完整备份' : '同步包'}（${fmtSize(zip.size)}，含 ${ids.length} 个文件），交给 GitHub 仓库即可同步`);
+    } catch (x) { toast('导出失败：' + (x.message || ''), false); }
   }
   async function importFile(file) {
-    let j;
-    try { j = JSON.parse(await file.text()); } catch { j = null; }
-    if (!C.valid(j)) { toast('这不是有效的 vault.json', false); return; }
+    let env = null;
+    const blobs = [];
+    try {
+      const buf = await file.arrayBuffer();
+      const head = new Uint8Array(buf, 0, 2);
+      if (head[0] === 0x50 && head[1] === 0x4b) { // zip 同步包 / 备份
+        const z = readZip(buf);
+        const vj = z.get('vault.json');
+        if (vj) env = JSON.parse(new TextDecoder().decode(vj));
+        for (const [name, data] of z) { const m = /^blobs\/([A-Za-z0-9]+)\.bin$/.exec(name); if (m && validId(m[1])) blobs.push([m[1], data]); }
+      } else env = JSON.parse(new TextDecoder().decode(buf));
+    } catch { env = null; }
+    if (!C.valid(env)) { toast('这不是有效的 vault.json 或同步包', false); return; }
     if (S.env && !(await ask('导入加密文件？', '会覆盖这台设备上的保险箱（未导出的更改会丢失）。', '导入'))) return;
-    S.env = j;
-    await setLocal('envelope', j); await setLocal('dirty', false);
-    lock('已导入，请解锁');
+    for (const [id, data] of blobs) await setLocal('blob:' + id, data.slice().buffer);
+    S.env = env;
+    await setLocal('envelope', env); await setLocal('dirty', false); await setLocal('pending', []);
+    lock(blobs.length ? `已导入（含 ${blobs.length} 个文件），请解锁` : '已导入，请解锁');
   }
-  $('#sync-pill').addEventListener('click', exportFile);
+  $('#sync-pill').addEventListener('click', () => exportSync(false));
   $('#btn-lock').addEventListener('click', () => lock());
 
   const dset = $('#dlg-settings');
@@ -1544,11 +1700,12 @@
       const rotate = $('#set-rotate').checked;
       await rekey(p1, rotate);
       dset.close();
-      toast('主密码已修改，记得导出新的 vault.json');
+      toast('主密码已修改，记得点“未同步”导出同步包');
       if (rotate) showKit(true);
     } finally { btn.disabled = false; btn.textContent = '修改'; }
   });
-  $('#set-export').addEventListener('click', exportFile);
+  $('#set-export').addEventListener('click', () => exportSync(false));
+  $('#set-backup').addEventListener('click', () => exportSync(true));
   $('#set-import').addEventListener('change', (e) => { dset.close(); if (e.target.files[0]) importFile(e.target.files[0]); e.target.value = ''; });
   $('#set-reload').addEventListener('click', async () => {
     const r = await fetchRemote();
