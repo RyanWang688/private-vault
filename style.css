@@ -423,6 +423,23 @@ details.sub[open] summary { margin-bottom: 12px; }
 .card-att { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--tc); min-width: 0; }
 .card-att .ic svg { width: 14px; height: 14px; }
 .card-att { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.media-tools { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.media-tools .btn .ic svg, .sec-title .btn .ic svg { width: 15px; height: 15px; }
+.sec-title .btn { text-transform: none; letter-spacing: 0; font-weight: 550; color: var(--fg); }
+.pv-loading { display: flex; align-items: center; gap: 10px; padding: 18px; color: var(--muted); font-size: 13px; }
+.pv-loading i { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--accent); animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.att-preview { padding: 8px; display: grid; gap: 10px; }
+.pv-page { margin: 0; position: relative; border-radius: 10px; overflow: hidden; background: #fff; box-shadow: var(--shadow-sm); cursor: grab; transition: transform .2s var(--ease), box-shadow .2s; }
+.pv-page:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); }
+.pv-page:active { cursor: grabbing; }
+.pv-page img { display: block; width: 100%; height: auto; }
+.pv-page figcaption { position: absolute; left: 0; right: 0; bottom: 0; display: flex; align-items: center; justify-content: space-between; padding: 6px 8px;
+  background: linear-gradient(transparent, rgba(0,0,0,.55)); color: #fff; font-size: 12px; opacity: 0; transition: opacity .2s; }
+.pv-page:hover figcaption, .pv-page:focus-within figcaption { opacity: 1; }
+@media (hover: none) { .pv-page figcaption { opacity: 1; } }
+.pv-page .icon-btn { background: rgba(255,255,255,.92); color: #222; }
+.pv-page.dragging { opacity: .5; }
 #kit-ack-wrap { padding: 10px 12px; border-radius: 12px; background: var(--surface-2); color: var(--fg); }
 #kit-ack-wrap.need { outline: 2px solid var(--danger); animation: shake .45s; }
 

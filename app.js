@@ -36,6 +36,7 @@
     upload: '<path d="M12 16V5m-4.5 4.5L12 5l4.5 4.5M4.5 19.5h15"/>',
     sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/>',
     moon: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',
+    pdf: '<path d="M6 3h9l4 4v14H6z"/><path d="M14.5 3v4.5H19"/><path d="M8.5 16.5v-4h1.3a1.3 1.3 0 0 1 0 2.6H8.5M13 12.5v4h.8a2 2 0 0 0 0-4zM17.5 12.5h-1.8v4M15.7 14.5h1.5"/>',
     clip: '<path d="M20 11.5l-8.2 8.2a5 5 0 0 1-7.1-7.1l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8"/>',
     image: '<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="10" r="1.8"/><path d="M20.5 16l-5-5-9 8.5"/>',
   };
@@ -49,7 +50,7 @@
   // ---------------- 类型定义 ----------------
   const TYPE_ORDER = ['login', 'identity', 'bank', 'note', 'file'];
   const TYPES = {
-    login: { label: '账号密码', short: '账号', fields: [
+    login: { label: '账号密码', short: '账号', attach: true, fields: [
       { k: 'username', l: '账号 / 邮箱', copy: true },
       { k: 'password', l: '密码', secret: true, copy: true, gen: true },
       { k: 'url', l: '网址', url: true, copy: true, ph: 'https://' }] },
@@ -58,14 +59,14 @@
       { k: 'kind', l: '证件类型', ph: '身份证 / 护照 / 驾照 / 学生证…' },
       { k: 'number', l: '证件号码', secret: true, copy: true },
       { k: 'expiry', l: '有效期' }] },
-    bank: { label: '银行卡', short: '银行卡', fields: [
+    bank: { label: '银行卡', short: '银行卡', attach: true, fields: [
       { k: 'bank', l: '银行' },
       { k: 'holder', l: '持卡人', copy: true },
       { k: 'number', l: '卡号', secret: true, copy: true, card: true },
       { k: 'expiry', l: '有效期', ph: 'MM/YY' },
       { k: 'cvv', l: 'CVV', secret: true, copy: true },
       { k: 'pin', l: 'PIN', secret: true }] },
-    note: { label: '笔记', short: '笔记', fields: [] },
+    note: { label: '笔记', short: '笔记', attach: true, fields: [] },
     file: { label: '文件', short: '文件', fields: [] },
   };
   const TYPE_DESC = { login: '网站、App 的登录信息', identity: '身份证、护照等证件', bank: '银行卡与支付信息', note: '任意文字，支持 [[双链]]', file: '图片、PDF、文档' };
@@ -219,7 +220,7 @@
   const S = {
     env: null, key: null, hdr: null, secret: null, data: null, dirty: false,
     filter: { kind: 'all' }, query: '', view: 'cards', sort: 'updated', drawer: null,
-    urls: new Map(), graph: null, graphTags: true, graphSig: null, fresh: null, dragOut: false, idle: 0,
+    urls: new Map(), pages: new Map(), graph: null, graphTags: true, graphSig: null, fresh: null, dragOut: false, idle: 0,
   };
   const byId = (id) => S.data && S.data.items.find((i) => i.id === id);
   const findByTitle = (t) => { const k = t.trim().toLowerCase(); return S.data.items.find((i) => (i.title || '').trim().toLowerCase() === k); };
@@ -406,6 +407,8 @@
     S.key = null; S.data = null; S.hdr = null;
     for (const u of S.urls.values()) URL.revokeObjectURL(u.url);
     S.urls.clear();
+    for (const p of S.pages.values()) p.then((list) => list.forEach((x) => { URL.revokeObjectURL(x.url); x.canvas.width = x.canvas.height = 0; })).catch(() => {});
+    S.pages.clear();
     S.drawer = null;
     $('#drawer').classList.remove('open'); $('#drawer').replaceChildren(); $('#scrim').classList.remove('show');
     $('#add-menu').hidden = true;
@@ -731,34 +734,200 @@
   const makeDraggable = (el, it) => draggableF(el, it.file, fileKey(it));
   const isPdf = (f) => f.mime === 'application/pdf' || /\.pdf$/i.test(f.name);
 
-  // ---------------- 附件（证件等） ----------------
+  // ---------------- PDF / 图片：渲染、复制为图片、拖出图片、导出 PDF ----------------
+  const isImage = (f) => (f.mime || '').startsWith('image/');
+  const isMedia = (f) => isPdf(f) || isImage(f);
+  const baseName = (n) => (n || 'file').replace(/\.[^.]+$/, '');
+  let pdfjsP = null;
+  function loadPdfjs() {
+    if (!pdfjsP) pdfjsP = new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = 'lib/pdfjs/pdf.min.js?v=3.11.174';
+      s.onload = () => { const L = window.pdfjsLib; L.GlobalWorkerOptions.workerSrc = 'lib/pdfjs/pdf.worker.min.js?v=3.11.174'; res(L); };
+      s.onerror = () => { pdfjsP = null; rej(new Error('PDF 组件加载失败')); };
+      document.head.append(s);
+    });
+    return pdfjsP;
+  }
+  const canvasBlob = (c, type = 'image/png', q) => new Promise((r) => c.toBlob(r, type, q));
+  // 返回该文件每一页的 { canvas, blob(png), url }；结果缓存到锁定为止
+  function pagesOf(f, key) {
+    const k = 'pages:' + key;
+    if (S.pages.has(k)) return S.pages.get(k);
+    const p = (async () => {
+      const canvases = [];
+      if (isPdf(f)) {
+        const L = await loadPdfjs();
+        const doc = await L.getDocument({ data: C.unb64(f.data), isEvalSupported: false, cMapUrl: 'lib/pdfjs/cmaps/', cMapPacked: true }).promise;
+        const n = Math.min(doc.numPages, 40);
+        for (let i = 1; i <= n; i++) {
+          const pg = await doc.getPage(i);
+          const v1 = pg.getViewport({ scale: 1 });
+          const vp = pg.getViewport({ scale: Math.min(3, Math.max(1.5, 1600 / v1.width)) });
+          const c = document.createElement('canvas');
+          c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
+          const x = c.getContext('2d');
+          x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height);
+          await pg.render({ canvasContext: x, viewport: vp, intent: 'print' }).promise; // print 模式在后台标签页也能渲染
+          canvases.push(c);
+        }
+        if (doc.numPages > n) toast(`PDF 共 ${doc.numPages} 页，只处理前 ${n} 页`, false);
+        doc.destroy();
+      } else {
+        const bmp = await createImageBitmap(blobEntry(f, key).blob);
+        const s = Math.min(1, 4000 / Math.max(bmp.width, bmp.height));
+        const c = document.createElement('canvas');
+        c.width = Math.round(bmp.width * s); c.height = Math.round(bmp.height * s);
+        const x = c.getContext('2d');
+        x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height);
+        x.drawImage(bmp, 0, 0, c.width, c.height);
+        canvases.push(c);
+      }
+      const out = [];
+      for (const c of canvases) { const blob = await canvasBlob(c); out.push({ canvas: c, blob, url: URL.createObjectURL(blob) }); }
+      return out;
+    })();
+    p.catch(() => S.pages.delete(k));
+    S.pages.set(k, p);
+    return p;
+  }
+  function stackCanvases(cs) {
+    if (cs.length === 1) return cs[0];
+    const gap = 24, w = Math.max(...cs.map((c) => c.width));
+    let hh = cs.reduce((s, c) => s + c.height * (w / c.width), 0) + gap * (cs.length - 1);
+    const s = Math.min(1, 30000 / hh, 16e7 / (w * hh));
+    const out = document.createElement('canvas');
+    out.width = Math.round(w * s); out.height = Math.round(hh * s);
+    const x = out.getContext('2d');
+    x.fillStyle = '#e9e9ec'; x.fillRect(0, 0, out.width, out.height);
+    let y = 0;
+    for (const c of cs) { const dh = c.height * (w / c.width) * s; x.drawImage(c, 0, y, out.width, dh); y += dh + gap * s; }
+    return out;
+  }
+  async function copyAsImage(f, key, pageIdx) {
+    if (!navigator.clipboard || !window.ClipboardItem) { toast('这个浏览器不支持复制图片，请改用拖拽或下载', false); return; }
+    toast(isPdf(f) ? '正在把 PDF 转成图片…' : '正在复制…', true);
+    try {
+      const png = (async () => {
+        const pages = await pagesOf(f, key);
+        if (pageIdx != null) return pages[pageIdx].blob;
+        return pages.length === 1 ? pages[0].blob : canvasBlob(stackCanvases(pages.map((p) => p.canvas)));
+      })();
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': png })]);
+      toast('已复制为图片，可以直接粘贴到微信、邮件或其他网站');
+    } catch { toast('复制失败，请改用拖拽或下载', false); }
+  }
+  // 最小 PDF 生成器：每页一张 JPEG，居中放在 A4 页面上
+  function buildPdf(pages) {
+    const te = new TextEncoder();
+    const chunks = [], offs = [];
+    let len = 0;
+    const push = (x) => { const b = typeof x === 'string' ? te.encode(x) : x; chunks.push(b); len += b.length; };
+    const obj = (id, fn) => { offs[id] = len; push(`${id} 0 obj\n`); fn(); push('\nendobj\n'); };
+    const n = pages.length, W = 595.28, H = 841.89, M = 28;
+    push('%PDF-1.4\n%âãÏÓ\n');
+    obj(1, () => push('<< /Type /Catalog /Pages 2 0 R >>'));
+    obj(2, () => push(`<< /Type /Pages /Count ${n} /Kids [${pages.map((_, i) => `${3 + 3 * i} 0 R`).join(' ')}] >>`));
+    pages.forEach((p, i) => {
+      const pid = 3 + 3 * i, iid = pid + 1, cid = pid + 2;
+      const s = Math.min((W - 2 * M) / p.w, (H - 2 * M) / p.h);
+      const dw = p.w * s, dh = p.h * s;
+      obj(pid, () => push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${W} ${H}] /Resources << /XObject << /Im${i} ${iid} 0 R >> >> /Contents ${cid} 0 R >>`));
+      obj(iid, () => { push(`<< /Type /XObject /Subtype /Image /Width ${p.w} /Height ${p.h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${p.jpeg.length} >>\nstream\n`); push(p.jpeg); push('\nendstream'); });
+      const cs = `q ${dw.toFixed(2)} 0 0 ${dh.toFixed(2)} ${((W - dw) / 2).toFixed(2)} ${((H - dh) / 2).toFixed(2)} cm /Im${i} Do Q`;
+      obj(cid, () => push(`<< /Length ${cs.length} >>\nstream\n${cs}\nendstream`));
+    });
+    const xref = len, total = 3 + 3 * n;
+    let x = `xref\n0 ${total}\n0000000000 65535 f \n`;
+    for (let id = 1; id < total; id++) x += String(offs[id]).padStart(10, '0') + ' 00000 n \n';
+    push(x + `trailer\n<< /Size ${total} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
+    return new Blob(chunks, { type: 'application/pdf' });
+  }
+  async function exportPdf(list, name) {
+    toast('正在生成 PDF…');
+    try {
+      const pages = [];
+      for (const { f, key } of list) {
+        for (const p of await pagesOf(f, key)) {
+          let c = p.canvas;
+          const s = Math.min(1, 2400 / Math.max(c.width, c.height));
+          if (s < 1) { const d = document.createElement('canvas'); d.width = Math.round(c.width * s); d.height = Math.round(c.height * s); d.getContext('2d').drawImage(c, 0, 0, d.width, d.height); c = d; }
+          const jpg = await canvasBlob(c, 'image/jpeg', 0.9);
+          pages.push({ w: c.width, h: c.height, jpeg: new Uint8Array(await jpg.arrayBuffer()) });
+        }
+      }
+      if (!pages.length) return;
+      const blob = buildPdf(pages);
+      const url = URL.createObjectURL(blob);
+      const a = h('a', { href: url, download: name.replace(/[\\/:*?"<>|]/g, '_') + '.pdf' });
+      document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      toast(`已导出 PDF（${pages.length} 页）`);
+    } catch { toast('导出失败', false); }
+  }
+  function dragImage(el, getPage, name) {
+    el.draggable = true;
+    el.addEventListener('dragstart', (e) => {
+      const p = getPage();
+      if (!p) { e.preventDefault(); return; }
+      S.dragOut = true;
+      const dt = e.dataTransfer;
+      dt.effectAllowed = 'copy';
+      dt.setData('DownloadURL', `image/png:${name.replace(/[:\r\n]/g, '_')}:${p.url}`);
+      dt.setData('text/plain', name);
+      try { dt.items.add(new File([p.blob], name, { type: 'image/png' })); } catch { /* 不支持 */ }
+      el.classList.add('dragging');
+    });
+    el.addEventListener('dragend', () => { S.dragOut = false; el.classList.remove('dragging'); });
+  }
+  // 预览：图片直接显示；PDF 渲染成一页页图片，每页都能复制 / 拖出
+  async function fillPreview(pv, f, key) {
+    pv.replaceChildren(h('div', { class: 'pv-loading' }, h('i'), isPdf(f) ? '正在渲染 PDF…' : '正在加载…'));
+    try {
+      const pages = await pagesOf(f, key);
+      const base = baseName(f.name);
+      pv.replaceChildren(...pages.map((p, i) => {
+        const nm = pages.length > 1 ? `${base}-第${i + 1}页.png` : `${base}.png`;
+        const fig = h('figure', { class: 'pv-page', title: '按住可把这张图片拖出去' },
+          h('img', { src: p.url, alt: nm, draggable: false }),
+          h('figcaption', null, pages.length > 1 ? h('span', { textContent: `第 ${i + 1} / ${pages.length} 页` }) : h('span'),
+            h('span', { class: 'pv-ops' }, iconBtn('copy', '复制这张图片', () => copyAsImage(f, key, i), 'sm'))));
+        dragImage(fig, () => p, nm);
+        if (motion()) fig.animate([{ opacity: 0, transform: 'translateY(8px)' }, { opacity: 1, transform: 'none' }], { duration: 320, delay: i * 50, fill: 'backwards', easing: 'cubic-bezier(.2,.8,.2,1)' });
+        return fig;
+      }));
+    } catch (x) { pv.replaceChildren(h('p', { class: 'hint', textContent: '无法预览：' + (x.message || '文件可能已损坏或受密码保护') })); }
+  }
+  // 一个文件（附件或文件卡片）的整行：拖出原文件 + 预览 / 复制为图片 / 导出 PDF / 下载
+  function mediaRow(f, key) {
+    const pv = h('div', { class: 'att-preview' });
+    let open = false;
+    const toggle = () => {
+      open = !open;
+      row.classList.toggle('open', open);
+      if (open) fillPreview(pv, f, key); else pv.replaceChildren();
+    };
+    const media = isMedia(f);
+    const row = h('div', { class: 'drag-out', title: '按住拖出原文件到桌面、文件夹或其他网站' },
+      h('span', { class: 'grip' }, icon('grip')),
+      h('div', { class: 'file-ext', textContent: extOf(f.name) }),
+      h('div', { class: 'f-main' }, h('div', { class: 'card-title', textContent: f.name }), h('small', { textContent: `${fmtSize(f.size)} · 按住拖出原文件` })),
+      iconBtn('download', '下载原文件', () => downloadF(f, key)));
+    draggableF(row, f, key);
+    const tools = media ? h('div', { class: 'media-tools' },
+      h('button', { type: 'button', class: 'btn sm', onclick: toggle }, icon('eye'), isPdf(f) ? '预览 / 拖出页面图片' : '预览'),
+      h('button', { type: 'button', class: 'btn sm', onclick: () => copyAsImage(f, key) }, icon('image'), '复制为图片'),
+      isImage(f) ? h('button', { type: 'button', class: 'btn sm', onclick: () => exportPdf([{ f, key }], baseName(f.name)) }, icon('pdf'), '导出为 PDF') : null,
+      isPdf(f) ? h('button', { type: 'button', class: 'btn sm', onclick: () => window.open(blobEntry(f, key).url, '_blank', 'noopener') }, icon('open'), '新标签页打开') : null) : null;
+    return h('div', { class: 'att' }, row, tools, pv);
+  }
+
+  // ---------------- 附件 ----------------
   function attachSection(it) {
-    const list = h('div', { class: 'att-list' });
-    for (const a of it.attachments) {
-      const key = attKey(a);
-      const pv = h('div', { class: 'att-preview' });
-      let open = false;
-      const canPreview = isPdf(a) || (a.mime || '').startsWith('image/');
-      const toggle = () => {
-        open = !open;
-        if (!open) { pv.replaceChildren(); row.classList.remove('open'); return; }
-        const url = blobEntry(a, key).url;
-        pv.replaceChildren(isPdf(a)
-          ? h('iframe', { src: url, title: a.name })
-          : h('img', { src: url, alt: a.name, draggable: false }));
-        row.classList.add('open');
-      };
-      const row = h('div', { class: 'drag-out', title: '按住拖到桌面、文件夹或其他网站的上传区' },
-        h('span', { class: 'grip' }, icon('grip')),
-        h('div', { class: 'file-ext', textContent: extOf(a.name) }),
-        h('div', { class: 'f-main' }, h('div', { class: 'card-title', textContent: a.name }), h('small', { textContent: `${fmtSize(a.size)} · 按住拖出去` })),
-        canPreview ? iconBtn('eye', '预览', toggle) : null,
-        isPdf(a) ? iconBtn('open', '在新标签页打开', () => window.open(blobEntry(a, key).url, '_blank', 'noopener')) : null,
-        iconBtn('download', '下载', () => downloadF(a, key)));
-      draggableF(row, a, key);
-      list.append(h('div', { class: 'att' }, row, pv));
-    }
-    return sec(`附件 · ${it.attachments.length}`, list);
+    const media = it.attachments.filter(isMedia);
+    const title = h('div', { class: 'sec-title' }, `附件 · ${it.attachments.length}`, h('span', { class: 'spacer' }),
+      media.length > 1 ? h('button', { type: 'button', class: 'btn sm', onclick: () => exportPdf(media.map((a) => ({ f: a, key: attKey(a) })), it.title || '附件') }, icon('pdf'), '全部合并为一个 PDF') : null);
+    return h('div', { class: 'sec' }, title, h('div', { class: 'att-list' }, ...it.attachments.map((a) => mediaRow(a, attKey(a)))));
   }
   function attachEditor(it) {
     const input = h('input', { type: 'file', accept: '.pdf,application/pdf,image/*', multiple: true, hidden: true });
@@ -913,16 +1082,7 @@
     else if ((mime.startsWith('text/') || /\.(txt|md|csv|json|log)$/i.test(it.file.name)) && it.file.size < 200000) {
       box.append(h('div', { class: 'preview' }, h('pre', { textContent: new TextDecoder().decode(C.unb64(it.file.data)) })));
     }
-    const drag = h('div', { class: 'drag-out', title: '按住拖到桌面、文件夹或其他网站的上传区' },
-      h('span', { class: 'grip' }, icon('grip')),
-      h('div', { class: 'file-ext', textContent: extOf(it.file.name) }),
-      h('div', { class: 'f-main' }, h('div', { class: 'card-title', textContent: it.file.name }), h('small', { textContent: `${fmtSize(it.file.size)} · 按住拖出去` })),
-      iconBtn('download', '下载', () => downloadItem(it)));
-    makeDraggable(drag, it);
-    box.append(drag);
-    if (mime.startsWith('image/') && navigator.clipboard && window.ClipboardItem) {
-      box.append(h('div', { class: 'row' }, h('button', { type: 'button', class: 'btn', onclick: () => copyImage(it) }, icon('image'), '复制图片（可直接粘贴到其他网站）')));
-    }
+    box.append(mediaRow(it.file, fileKey(it)));
     return box;
   }
 
