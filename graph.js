@@ -1,21 +1,28 @@
 'use strict';
-/* 力导向关系图谱（纯 Canvas，无外部依赖） */
+/* 力导向关系图谱（纯 Canvas，无外部依赖）
+   物理模型参照 d3-force：速度衰减 + 弹簧 + 斥力 + 碰撞 + 向心力，alpha 退火；
+   拖拽时整张图保持“温热”，邻居会被平滑地带动，松手后慢慢静下来。 */
 window.VGraph = (() => {
+  const FONT = '12px system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif';
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
   function create(canvas, opts = {}) {
     const ctx = canvas.getContext('2d');
     let W = 0, H = 0, dpr = 1;
     let nodes = [], edges = [], byId = new Map(), adj = new Map();
-    let alpha = 1, raf = 0, colors = {};
+    let alpha = 0, alphaTarget = 0, raf = 0, colors = {};
     const cam = { x: 0, y: 0, k: 1 };
-    let camT = null, hover = null, highlight = null, drag = null, firstFit = true;
+    let camT = null, hover = null, highlight = null, drag = null, fresh = true, pendingFit = null;
+    let inertia = null, needFit = false;
     const pointers = new Map();
+    const reduce = matchMedia('(prefers-reduced-motion: reduce)');
 
     function readColors() {
       const cs = getComputedStyle(canvas);
       const v = (n) => cs.getPropertyValue(n).trim();
       colors = {
         login: v('--c-login'), identity: v('--c-identity'), bank: v('--c-bank'), note: v('--c-note'),
-        file: v('--c-file'), tag: v('--c-tag'), fg: v('--fg'), line: v('--line-strong'), bg: v('--bg'), accent: v('--accent'),
+        file: v('--c-file'), tag: v('--c-tag'), fg: v('--fg'), muted: v('--muted'), line: v('--line-strong'), bg: v('--bg'), accent: v('--accent'),
       };
     }
     function resize() {
@@ -24,177 +31,276 @@ window.VGraph = (() => {
       dpr = Math.min(window.devicePixelRatio || 1, 2);
       W = r.width; H = r.height;
       canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+      if (needFit) { needFit = false; applyFit(null, 1.6, true); }
       kick();
     }
     const ro = new ResizeObserver(resize);
     ro.observe(canvas);
 
+    // ---------- 数据 ----------
+    function labelOf(n) { return n.label.length > 18 ? n.label.slice(0, 17) + '…' : n.label; }
     function setData(ns, es) {
       const old = byId;
       byId = new Map();
+      const added = [];
       nodes = ns.map((n) => {
-        const o = old.get(n.id);
-        const node = Object.assign(o || { x: (Math.random() - 0.5) * 60, y: (Math.random() - 0.5) * 60, vx: 0, vy: 0, a: 0 }, n);
+        let node = old.get(n.id);
+        if (!node) { node = { x: 0, y: 0, vx: 0, vy: 0, a: 0, s: 1, placed: false }; added.push(node); }
+        Object.assign(node, n);
+        node.text = labelOf(node);
         byId.set(n.id, node);
         return node;
       });
       edges = es.filter(([s, t]) => byId.has(s) && byId.has(t)).map(([s, t]) => ({ s: byId.get(s), t: byId.get(t) }));
       adj = new Map(nodes.map((n) => [n, new Set()]));
       for (const e of edges) { adj.get(e.s).add(e.t); adj.get(e.t).add(e.s); }
-      for (const n of nodes) n.r = n.kind === 'tag' ? 4 : Math.min(15, 6 + Math.sqrt(adj.get(n).size) * 2.4);
+      for (const n of nodes) {
+        n.deg = adj.get(n).size;
+        n.r = n.kind === 'tag' ? 3.5 + Math.min(3, Math.sqrt(n.deg)) : 5 + Math.min(9, Math.sqrt(n.deg) * 2.2);
+      }
+      for (const e of edges) {
+        e.str = 1 / Math.max(1, Math.min(e.s.deg, e.t.deg));
+        e.bias = e.s.deg / ((e.s.deg + e.t.deg) || 1);
+        e.len = (e.s.kind === 'tag' || e.t.kind === 'tag') ? 55 : 75;
+      }
+      // 新节点放在已有邻居旁边，避免从中心“炸开”
+      added.forEach((n, i) => {
+        const nb = [...adj.get(n)].find((m) => m.placed);
+        if (nb) { n.x = nb.x + (Math.random() - 0.5) * 30; n.y = nb.y + (Math.random() - 0.5) * 30; }
+        else { const ang = i * 2.39996, rad = 12 * Math.sqrt(i + 0.5) + (old.size ? 80 : 0); n.x = Math.cos(ang) * rad; n.y = Math.sin(ang) * rad; }
+        n.placed = true;
+      });
       if (hover && !byId.has(hover.id)) hover = null;
-      alpha = Math.max(alpha, old.size ? 0.4 : 1);
-      if (firstFit && nodes.length) { firstFit = false; setTimeout(() => fit(), 700); }
+      if (!nodes.length) { fresh = true; alpha = 0; draw(); return; }
+      if (fresh) {
+        // 首次：先在后台把布局跑到基本稳定，再直接定好视角，打开就是整齐的
+        fresh = false;
+        alpha = 1;
+        for (let i = 0; i < 260 && alpha > 0.03; i++) tick();
+        for (const n of nodes) n.a = targetA(n);
+        applyFit(null, 1.6, true);
+      } else if (added.length || old.size !== nodes.length) {
+        alpha = Math.max(alpha, 0.35);
+      }
       kick();
     }
 
+    // ---------- 物理 ----------
     function tick() {
-      if (alpha < 0.003) return;
       const n = nodes.length;
+      // 弹簧
+      for (const e of edges) {
+        const s = e.s, t = e.t;
+        let dx = t.x + t.vx - s.x - s.vx, dy = t.y + t.vy - s.y - s.vy;
+        let l = Math.sqrt(dx * dx + dy * dy) || 1e-3;
+        l = (l - e.len) / l * alpha * e.str;
+        dx *= l; dy *= l;
+        t.vx -= dx * e.bias; t.vy -= dy * e.bias;
+        s.vx += dx * (1 - e.bias); s.vy += dy * (1 - e.bias);
+      }
+      // 斥力 + 碰撞（节点数量很少，直接 O(n²)）
       for (let i = 0; i < n; i++) {
         const a = nodes[i];
         for (let j = i + 1; j < n; j++) {
           const b = nodes[j];
           let dx = b.x - a.x, dy = b.y - a.y, d2 = dx * dx + dy * dy;
-          if (d2 < 1) { dx = Math.random() - 0.5; dy = Math.random() - 0.5; d2 = 1; }
-          if (d2 > 160000) continue;
-          const f = ((a.kind === 'tag' || b.kind === 'tag') ? 70 : 150) * alpha / d2;
-          a.vx -= dx * f; a.vy -= dy * f; b.vx += dx * f; b.vy += dy * f;
+          if (d2 < 1e-6) { dx = (Math.random() - 0.5) * 1e-2; dy = (Math.random() - 0.5) * 1e-2; d2 = dx * dx + dy * dy; }
+          if (d2 < 360000) {
+            const sa = a.kind === 'tag' ? 60 : 150, sb = b.kind === 'tag' ? 60 : 150;
+            const w = alpha / Math.max(d2, 64);
+            a.vx -= dx * w * sb; a.vy -= dy * w * sb;
+            b.vx += dx * w * sa; b.vy += dy * w * sa;
+          }
+          const rr = a.r + b.r + 26;
+          if (d2 < rr * rr) {
+            const d = Math.sqrt(d2), push = (rr - d) / d * 0.35;
+            a.vx -= dx * push; a.vy -= dy * push; b.vx += dx * push; b.vy += dy * push;
+          }
         }
       }
-      for (const e of edges) {
-        const dx = e.t.x - e.s.x, dy = e.t.y - e.s.y;
-        const d = Math.sqrt(dx * dx + dy * dy) || 1;
-        const L = (e.s.kind === 'tag' || e.t.kind === 'tag') ? 55 : 85;
-        const k = (d - L) / d * alpha * 0.1;
-        e.t.vx -= dx * k; e.t.vy -= dy * k; e.s.vx += dx * k; e.s.vy += dy * k;
+      // 向心力：让孤立的小团不会漂得很远
+      for (const p of nodes) {
+        const g = p.deg ? 0.06 : 0.12;
+        p.vx -= p.x * g * alpha; p.vy -= p.y * g * alpha;
       }
       for (const p of nodes) {
         if (p.fx != null) { p.x = p.fx; p.y = p.fy; p.vx = p.vy = 0; continue; }
-        p.vx -= p.x * 0.012 * alpha; p.vy -= p.y * 0.012 * alpha;
-        p.vx *= 0.6; p.vy *= 0.6;
+        p.vx *= 0.58; p.vy *= 0.58;
         p.x += p.vx; p.y += p.vy;
       }
-      alpha += (0 - alpha) * 0.02;
+      alpha += (alphaTarget - alpha) * 0.0228;
     }
 
+    // ---------- 渲染循环 ----------
     function targetA(p) {
-      if (hover) return (p === hover || adj.get(hover).has(p)) ? 1 : 0.1;
-      if (highlight) return highlight.has(p.id) ? 1 : 0.12;
+      if (hover) return (p === hover || adj.get(hover).has(p)) ? 1 : 0.14;
+      if (highlight) {
+        if (highlight.has(p.id)) return 1;
+        for (const m of adj.get(p)) if (highlight.has(m.id)) return 0.4;
+        return 0.1;
+      }
       return 1;
     }
+    const ease = (cur, t, f) => { const d = t - cur; return Math.abs(d) < 0.004 ? [t, false] : [cur + d * f, true]; };
 
     function frame() {
       raf = 0;
-      const wasHot = alpha >= 0.04;
-      tick();
-      if (wasHot && alpha < 0.04 && pendingFit) { applyFit(pendingFit.ids, pendingFit.maxK); pendingFit = null; }
-      let moving = alpha >= 0.003 || !!drag;
+      let moving = false;
+      if (alpha > 0.004 || alphaTarget > 0) { tick(); moving = true; }
+      if (pendingFit && alpha < 0.05) { applyFit(pendingFit.ids, pendingFit.maxK); pendingFit = null; }
+      if (inertia) {
+        cam.x += inertia.vx; cam.y += inertia.vy;
+        inertia.vx *= 0.9; inertia.vy *= 0.9;
+        if (Math.abs(inertia.vx) + Math.abs(inertia.vy) < 0.2) inertia = null;
+        moving = true;
+      }
       if (camT) {
-        cam.x += (camT.x - cam.x) * 0.14; cam.y += (camT.y - cam.y) * 0.14; cam.k += (camT.k - cam.k) * 0.14;
-        if (Math.abs(camT.x - cam.x) < 0.5 && Math.abs(camT.y - cam.y) < 0.5 && Math.abs(camT.k - cam.k) < 0.002) { Object.assign(cam, camT); camT = null; }
+        const f = reduce.matches ? 1 : 0.16;
+        cam.x += (camT.x - cam.x) * f; cam.y += (camT.y - cam.y) * f; cam.k += (camT.k - cam.k) * f;
+        if (Math.abs(camT.x - cam.x) < 0.3 && Math.abs(camT.y - cam.y) < 0.3 && Math.abs(camT.k - cam.k) < 0.001) { Object.assign(cam, camT); camT = null; }
         moving = true;
       }
       for (const p of nodes) {
-        const t = targetA(p), d = t - p.a;
-        if (Math.abs(d) > 0.01) { p.a += d * 0.16; moving = true; } else p.a = t;
+        let m1, m2;
+        [p.a, m1] = ease(p.a, targetA(p), 0.14);
+        [p.s, m2] = ease(p.s, p === hover ? 1.35 : 1, 0.2);
+        if (m1 || m2) moving = true;
       }
       draw();
-      if (moving) raf = requestAnimationFrame(frame);
+      if (moving || drag) raf = requestAnimationFrame(frame);
     }
     function kick() { if (!raf) raf = requestAnimationFrame(frame); }
 
     function draw() {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, W, H);
+      if (!nodes.length) return;
       const ox = W / 2 + cam.x, oy = H / 2 + cam.y, k = cam.k;
+      const X = (p) => p.x * k + ox, Y = (p) => p.y * k + oy;
+
+      // 连线：先画普通的，再画高亮的，保证高亮线在上层
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = colors.line;
+      ctx.lineWidth = Math.max(0.6, Math.min(1.4, k));
       for (const e of edges) {
-        const hot = hover && (e.s === hover || e.t === hover);
-        ctx.globalAlpha = hot ? 0.95 : 0.85 * Math.min(e.s.a, e.t.a);
-        ctx.strokeStyle = hot ? colors.accent : colors.line;
-        ctx.lineWidth = hot ? 1.6 : 1;
-        ctx.beginPath();
-        ctx.moveTo(e.s.x * k + ox, e.s.y * k + oy);
-        ctx.lineTo(e.t.x * k + ox, e.t.y * k + oy);
-        ctx.stroke();
+        if (hover && (e.s === hover || e.t === hover)) continue;
+        const a = Math.min(e.s.a, e.t.a);
+        if (a < 0.02) continue;
+        ctx.globalAlpha = 0.75 * a;
+        ctx.beginPath(); ctx.moveTo(X(e.s), Y(e.s)); ctx.lineTo(X(e.t), Y(e.t)); ctx.stroke();
       }
+      if (hover) {
+        ctx.strokeStyle = colors.accent; ctx.lineWidth = 1.6; ctx.globalAlpha = 0.9;
+        for (const e of edges) {
+          if (e.s !== hover && e.t !== hover) continue;
+          ctx.beginPath(); ctx.moveTo(X(e.s), Y(e.s)); ctx.lineTo(X(e.t), Y(e.t)); ctx.stroke();
+        }
+      }
+
+      // 节点
       for (const p of nodes) {
-        const x = p.x * k + ox, y = p.y * k + oy, r = Math.max(2.5, p.r * k);
+        const x = X(p), y = Y(p), r = Math.max(2.2, p.r * k) * p.s;
         const col = colors[p.type] || colors.tag;
-        ctx.globalAlpha = Math.max(0.08, p.a);
-        if (p === hover) { ctx.shadowColor = col; ctx.shadowBlur = 18; }
+        ctx.globalAlpha = Math.max(0.06, p.a);
+        if (p === hover) { ctx.shadowColor = col; ctx.shadowBlur = 16; }
         ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
         if (p.kind === 'tag') {
           ctx.fillStyle = colors.bg; ctx.fill();
           ctx.lineWidth = 1.5; ctx.strokeStyle = col; ctx.stroke();
         } else {
           ctx.fillStyle = col; ctx.fill();
-          ctx.lineWidth = 2; ctx.strokeStyle = colors.bg; ctx.stroke();
         }
         ctx.shadowBlur = 0;
       }
-      ctx.font = '12px system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'top';
+
+      // 文字：缩小时淡出；按优先级放置，互相重叠的就不画，避免糊成一片
+      ctx.font = FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'top'; ctx.lineJoin = 'round';
+      const zoomFade = nodes.length <= 40 ? 1 : clamp((k - 0.55) / 0.45, 0, 1);
+      const cand = [];
       for (const p of nodes) {
         const near = hover && (p === hover || adj.get(hover).has(p));
-        const show = near || (highlight && highlight.has(p.id)) || k > 1.15 || nodes.length <= 36;
-        if (!show || p.a < 0.3) continue;
-        const label = p.label.length > 16 ? p.label.slice(0, 15) + '…' : p.label;
-        ctx.globalAlpha = p.a * (p.kind === 'tag' ? 0.65 : 0.92);
-        ctx.fillStyle = colors.fg;
-        ctx.fillText(label, p.x * k + ox, p.y * k + oy + Math.max(2.5, p.r * k) + 5);
+        const hit = highlight && highlight.has(p.id);
+        let op = near ? 1 : (hover ? 0 : (hit ? 1 : zoomFade) * p.a);
+        if (p.kind === 'tag' && !near && !hit) op *= 0.75;
+        if (op < 0.05) continue;
+        const x = X(p), y = Y(p) + Math.max(2.2, p.r * k) * p.s + 4;
+        if (x < -100 || x > W + 100 || y < -30 || y > H + 30) continue;
+        const pri = (p === hover ? 1e6 : 0) + (near ? 1e5 : 0) + (hit ? 1e4 : 0) + p.deg * 10 + (p.kind === 'tag' ? 0 : 5);
+        cand.push({ p, x, y, op, pri });
+      }
+      cand.sort((a, b) => b.pri - a.pri);
+      const boxes = [];
+      for (const c of cand) {
+        const w = ctx.measureText(c.p.text).width;
+        const b = { x0: c.x - w / 2 - 3, x1: c.x + w / 2 + 3, y0: c.y - 1, y1: c.y + 15 };
+        if (boxes.some((o) => b.x0 < o.x1 && b.x1 > o.x0 && b.y0 < o.y1 && b.y1 > o.y0)) continue;
+        boxes.push(b);
+        ctx.globalAlpha = c.op;
+        ctx.lineWidth = 4; ctx.strokeStyle = colors.bg; ctx.strokeText(c.p.text, c.x, c.y);
+        ctx.fillStyle = c.p.kind === 'tag' ? colors.muted : colors.fg;
+        ctx.fillText(c.p.text, c.x, c.y);
       }
       ctx.globalAlpha = 1;
     }
 
+    // ---------- 视角 ----------
     function toWorld(sx, sy) { return { x: (sx - W / 2 - cam.x) / cam.k, y: (sy - H / 2 - cam.y) / cam.k }; }
     function hit(sx, sy) {
       const w = toWorld(sx, sy);
       let best = null, bd = Infinity;
       for (const p of nodes) {
         const d = Math.hypot(p.x - w.x, p.y - w.y);
-        if (d < p.r + 8 / cam.k && d < bd) { best = p; bd = d; }
+        if (d < p.r + 9 / cam.k && d < bd) { best = p; bd = d; }
       }
       return best;
     }
-
-    let pendingFit = null;
-    function fit(ids, maxK = 2) {
-      pendingFit = { ids, maxK };
+    function fit(ids, maxK = 1.6) {
+      pendingFit = alpha > 0.05 ? { ids, maxK } : null;
       applyFit(ids, maxK);
     }
-    function applyFit(ids, maxK) {
+    function applyFit(ids, maxK, instant) {
       const list = ids ? nodes.filter((n) => ids.has(n.id)) : nodes;
-      if (!list.length || !W) return;
+      if (!list.length) return;
+      if (!W) { if (instant) needFit = true; return; }
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-      for (const p of list) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
-      const k = Math.max(0.3, Math.min(maxK, (W - 120) / Math.max(x1 - x0, 1), (H - 120) / Math.max(y1 - y0, 1)));
+      for (const p of list) { x0 = Math.min(x0, p.x - p.r); y0 = Math.min(y0, p.y - p.r); x1 = Math.max(x1, p.x + p.r); y1 = Math.max(y1, p.y + p.r + 18); }
+      const k = clamp(Math.min((W - 140) / Math.max(x1 - x0, 1), (H - 140) / Math.max(y1 - y0, 1)), 0.3, maxK);
       const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
-      camT = { x: -cx * k, y: -cy * k, k };
+      const t = { x: -cx * k, y: -cy * k, k };
+      if (instant) { Object.assign(cam, t); camT = null; } else camT = t;
       kick();
     }
-
     function setHighlight(set, doFit) {
       highlight = set || null;
-      if (doFit) fit(highlight && highlight.size ? highlight : null, highlight ? 1.8 : 2);
+      if (doFit) fit(highlight && highlight.size ? highlight : null, highlight ? 1.6 : 1.6);
+      kick();
+    }
+    function zoomAt(mx, my, k2, smooth) {
+      const base = smooth && camT ? camT : cam;
+      k2 = clamp(k2, 0.2, 4);
+      const wx = (mx - W / 2 - base.x) / base.k, wy = (my - H / 2 - base.y) / base.k;
+      const t = { x: mx - W / 2 - wx * k2, y: my - H / 2 - wy * k2, k: k2 };
+      pendingFit = null; inertia = null;
+      if (smooth && !reduce.matches) camT = t; else { Object.assign(cam, t); camT = null; }
       kick();
     }
 
-    // ---- 交互 ----
+    // ---------- 交互 ----------
     const pos = (e) => { const r = canvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
     canvas.addEventListener('pointerdown', (e) => {
       canvas.setPointerCapture(e.pointerId);
       const p = pos(e);
       pointers.set(e.pointerId, p);
-      camT = null; pendingFit = null;
+      camT = null; pendingFit = null; inertia = null;
       if (pointers.size === 2) {
+        if (drag && drag.n) { drag.n.fx = drag.n.fy = null; alphaTarget = 0; }
         const [a, b] = [...pointers.values()];
         drag = { mode: 'pinch', d0: Math.hypot(a.x - b.x, a.y - b.y), k0: cam.k, moved: true };
         return;
       }
       const n = hit(p.x, p.y);
-      drag = n ? { mode: 'node', n, sx: p.x, sy: p.y, moved: false } : { mode: 'pan', sx: p.x, sy: p.y, cx: cam.x, cy: cam.y, moved: false };
+      drag = n ? { mode: 'node', n, sx: p.x, sy: p.y, moved: false }
+        : { mode: 'pan', sx: p.x, sy: p.y, cx: cam.x, cy: cam.y, moved: false, lx: p.x, ly: p.y, lt: e.timeStamp, vx: 0, vy: 0 };
     });
     canvas.addEventListener('pointermove', (e) => {
       const p = pos(e);
@@ -204,21 +310,27 @@ window.VGraph = (() => {
         if (n !== hover) { hover = n; canvas.style.cursor = n ? 'pointer' : 'grab'; kick(); }
         return;
       }
-      if (drag.mode === 'pinch' && pointers.size === 2) {
-        const [a, b] = [...pointers.values()];
-        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-        zoomAt(mid.x, mid.y, drag.k0 * Math.hypot(a.x - b.x, a.y - b.y) / drag.d0);
+      if (drag.mode === 'pinch') {
+        if (pointers.size === 2) {
+          const [a, b] = [...pointers.values()];
+          zoomAt((a.x + b.x) / 2, (a.y + b.y) / 2, drag.k0 * Math.hypot(a.x - b.x, a.y - b.y) / drag.d0, false);
+        }
         return;
       }
-      if (Math.hypot(p.x - drag.sx, p.y - drag.sy) > 4) drag.moved = true;
+      if (!drag.moved && Math.hypot(p.x - drag.sx, p.y - drag.sy) > 4) {
+        drag.moved = true;
+        if (drag.mode === 'node') { alphaTarget = 0.3; alpha = Math.max(alpha, 0.3); hover = drag.n; }
+      }
       if (!drag.moved) return;
       if (drag.mode === 'node') {
         const w = toWorld(p.x, p.y);
         drag.n.fx = w.x; drag.n.fy = w.y;
-        hover = drag.n;
-        alpha = Math.max(alpha, 0.25);
-      } else if (drag.mode === 'pan') {
+        canvas.style.cursor = 'grabbing';
+      } else {
         cam.x = drag.cx + p.x - drag.sx; cam.y = drag.cy + p.y - drag.sy;
+        const dt = Math.max(1, e.timeStamp - drag.lt);
+        drag.vx = clamp((p.x - drag.lx) / Math.max(dt, 8) * 16, -28, 28); drag.vy = clamp((p.y - drag.ly) / Math.max(dt, 8) * 16, -28, 28);
+        drag.lx = p.x; drag.ly = p.y; drag.lt = e.timeStamp;
         canvas.style.cursor = 'grabbing';
       }
       kick();
@@ -228,7 +340,11 @@ window.VGraph = (() => {
       if (!drag) return;
       if (drag.mode === 'node') {
         drag.n.fx = drag.n.fy = null;
+        alphaTarget = 0;
+        if (drag.moved) alpha = Math.max(alpha, 0.3);
         if (!drag.moved && opts.onClick) opts.onClick(drag.n);
+      } else if (drag.mode === 'pan' && drag.moved && e.type === 'pointerup' && !reduce.matches && e.timeStamp - drag.lt < 80) {
+        inertia = { vx: drag.vx, vy: drag.vy };
       }
       if (pointers.size === 0) drag = null;
       canvas.style.cursor = hover ? 'pointer' : 'grab';
@@ -237,28 +353,22 @@ window.VGraph = (() => {
     canvas.addEventListener('pointerup', end);
     canvas.addEventListener('pointercancel', end);
     canvas.addEventListener('pointerleave', () => { if (!drag && hover) { hover = null; kick(); } });
-    function zoomAt(mx, my, k2) {
-      k2 = Math.max(0.25, Math.min(4, k2));
-      camT = null; pendingFit = null;
-      const w = toWorld(mx, my);
-      cam.k = k2;
-      cam.x = mx - W / 2 - w.x * k2; cam.y = my - H / 2 - w.y * k2;
-      kick();
-    }
     canvas.addEventListener('wheel', (e) => {
-      e.preventDefault(); camT = null; pendingFit = null;
+      e.preventDefault();
       const p = pos(e);
-      zoomAt(p.x, p.y, cam.k * Math.exp(-e.deltaY * 0.0015));
+      const base = camT ? camT.k : cam.k;
+      const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+      zoomAt(p.x, p.y, base * Math.exp(-clamp(dy, -120, 120) * 0.0022), true);
     }, { passive: false });
-    canvas.addEventListener('dblclick', () => fit());
+    canvas.addEventListener('dblclick', (e) => { if (!hit(pos(e).x, pos(e).y)) fit(); });
 
     readColors();
     resize();
     return {
       setData, setHighlight, fit, resize,
       refreshColors() { readColors(); kick(); },
-      zoom(f) { zoomAt(W / 2, H / 2, cam.k * f); },
-      reheat() { alpha = Math.max(alpha, 0.6); kick(); },
+      zoom(f) { zoomAt(W / 2, H / 2, (camT ? camT.k : cam.k) * f, true); },
+      reheat() { alpha = Math.max(alpha, 0.5); kick(); },
     };
   }
   return { create };
