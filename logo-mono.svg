@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>密匣</title>
+  <defs>
+    <mask id="mx-mm">
+      <rect width="64" height="64" fill="#fff"/>
+      <circle cx="39" cy="24" r="10" fill="#000"/>
+      <rect x="36.6" y="24" width="4.8" height="44" fill="#000"/>
+      <circle cx="39" cy="24" r="4.6" fill="#fff"/>    </mask>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="17" fill="#1f1d1a" mask="url(#mx-mm)"/>
+</svg>

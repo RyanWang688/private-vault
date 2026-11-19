@@ -1,6 +1,6 @@
 'use strict';
 /*
- * 私人保险箱 —— 所有加密/解密都在浏览器本地完成（见 crypto.js）。
+ * 密匣 —— 所有加密/解密都在浏览器本地完成（见 crypto.js）。
  * 主密码、秘密钥匙与明文从不离开本机；GitHub 仓库里只有 vault.json（密文）。
  */
 (() => {
@@ -616,7 +616,7 @@
   $('#kit-copy').addEventListener('click', () => copyText(C.formatSecret(S.secret.bytes), '秘密钥匙'));
   $('#kit-download').addEventListener('click', () => {
     const txt = [
-      '私人保险箱 · 应急包',
+      '密匣 · 应急包',
       '========================',
       '',
       '网址：' + location.origin + location.pathname,
@@ -630,7 +630,7 @@
       '- 不要把这份文件上传到 GitHub，也不要和主密码放在同一个地方。',
       '- 建议打印出来或保存在密码管理器中，然后删除这个文件。',
     ].join('\r\n');
-    const a = h('a', { href: URL.createObjectURL(new Blob(['﻿' + txt], { type: 'text/plain;charset=utf-8' })), download: '私人保险箱-应急包.txt' });
+    const a = h('a', { href: URL.createObjectURL(new Blob(['﻿' + txt], { type: 'text/plain;charset=utf-8' })), download: '密匣-应急包.txt' });
     document.body.append(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   });
