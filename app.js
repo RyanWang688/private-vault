@@ -1696,22 +1696,68 @@
   $('#btn-lock').addEventListener('click', () => lock());
 
   const dset = $('#dlg-settings');
-  $('#btn-settings').addEventListener('click', () => {
-    $('#set-autolock').value = String(S.data.settings.autolock || 5);
-    ['#set-old', '#set-new', '#set-new2'].forEach((s) => { $(s).value = ''; });
-    $('#set-rotate').checked = false; $('#set-err').textContent = '';
+  const pwInputs = ['#set-kit-pw', '#set-old', '#set-new', '#set-new2'];
+  const clearSetErrors = () => ['#set-kit-err', '#set-chg-err', '#set-sync-err'].forEach((s) => { $(s).textContent = ''; });
+  function setPane(name) {
+    dset.querySelectorAll('.set-tabs button').forEach((b) => b.classList.toggle('on', b.dataset.pane === name));
+    dset.querySelectorAll('.set-pane').forEach((p) => { p.hidden = p.dataset.pane !== name; });
+  }
+  dset.querySelectorAll('.set-tabs button').forEach((b) => b.addEventListener('click', () => setPane(b.dataset.pane)));
+  async function paintSyncStatus() {
+    const pend = ((await getLocal('pending')) || []).length;
+    const box = $('#sync-status');
+    box.classList.toggle('dirty', S.dirty);
+    $('#sync-status-title').textContent = S.dirty ? '有未同步的更改' : '已与上次导出一致';
+    const parts = [];
+    if (S.env && S.env.saved) parts.push('最后保存 ' + fmtDate(S.env.saved));
+    if (S.dirty && pend) parts.push(`${pend} 个新文件待上传`);
+    if (S.env) parts.push('文字信息 ' + fmtSize(S.env.ct.length));
+    $('#sync-status-text').textContent = parts.join(' · ');
+  }
+  function openSettings(pane) {
+    const v = String(S.data.settings.autolock || 5);
+    dset.querySelectorAll('input[name=autolock]').forEach((r) => { r.checked = r.value === v; });
+    const t = getTheme() || 'system';
+    dset.querySelectorAll('input[name=theme]').forEach((r) => { r.checked = r.value === t; });
+    pwInputs.forEach((s) => { $(s).value = ''; });
+    $('#set-rotate').checked = false;
+    clearSetErrors();
+    dset.querySelectorAll('details.srow').forEach((d) => { d.open = false; });
+    setPane(pane || 'security');
+    paintSyncStatus();
     dset.showModal();
-  });
-  dset.addEventListener('close', () => ['#set-old', '#set-new', '#set-new2'].forEach((s) => { $(s).value = ''; }));
-  $('#set-autolock').addEventListener('change', async (e) => { S.data.settings.autolock = +e.target.value; await save(); bumpIdle(); toast('已更新自动锁定时间'); });
-  async function needOld() {
-    const err = $('#set-err'); err.textContent = '';
-    const pw = $('#set-old').value;
-    if (!pw) { err.textContent = '请先输入当前主密码'; $('#set-old').focus(); return null; }
-    if (!(await verifyPw(pw))) { err.textContent = '当前主密码不正确'; return null; }
+  }
+  $('#btn-settings').addEventListener('click', () => openSettings());
+  dset.addEventListener('close', () => pwInputs.forEach((s) => { $(s).value = ''; }));
+  dset.querySelectorAll('details.srow').forEach((d) => d.addEventListener('toggle', () => {
+    if (!d.open) return;
+    dset.querySelectorAll('details.srow').forEach((o) => { if (o !== d) o.open = false; });
+    clearSetErrors();
+    const first = d.querySelector('input[type=password]');
+    if (first) setTimeout(() => first.focus(), 60);
+  }));
+  dset.querySelectorAll('input[name=autolock]').forEach((r) => r.addEventListener('change', async () => {
+    S.data.settings.autolock = +r.value; await save(); bumpIdle(); toast(`已改为无操作 ${r.value} 分钟自动锁定`);
+  }));
+  dset.querySelectorAll('input[name=theme]').forEach((r) => r.addEventListener('change', () => {
+    const t = r.value === 'system' ? null : r.value;
+    try { if (t) localStorage.setItem('pv-theme', t); else localStorage.removeItem('pv-theme'); } catch { /* 无痕模式 */ }
+    applyTheme(t);
+  }));
+  async function needOld(inputSel, errSel) {
+    const err = $(errSel); err.textContent = '';
+    const pw = $(inputSel).value;
+    if (!pw) { err.textContent = '请先输入当前主密码'; $(inputSel).focus(); return null; }
+    if (!(await verifyPw(pw))) { err.textContent = '当前主密码不正确'; $(inputSel).select(); return null; }
     return pw;
   }
-  $('#set-showkit').addEventListener('click', async () => { if (await needOld()) { dset.close(); showKit(false); } });
+  $('#set-kit-pw').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#set-showkit').click(); } });
+  $('#set-showkit').addEventListener('click', async () => {
+    const btn = $('#set-showkit');
+    btn.disabled = true; btn.textContent = '正在验证…';
+    try { if (await needOld('#set-kit-pw', '#set-kit-err')) { dset.close(); showKit(false); } }
+    finally { btn.disabled = false; btn.textContent = '验证并查看'; }
+  });
   $('#set-forget').addEventListener('click', async () => {
     if (!(await ask('在本设备忘记秘密钥匙？', '下次在这台设备解锁时，需要重新输入应急包里的秘密钥匙。请确认你已保存好应急包。', '忘记'))) return;
     await delLocal('secret'); S.secret = null;
@@ -1719,31 +1765,32 @@
   });
   $('#set-change').addEventListener('click', async () => {
     const btn = $('#set-change');
-    const old = await needOld(); if (!old) return;
-    const p1 = $('#set-new').value, p2 = $('#set-new2').value;
-    const msg = checkNewPw(p1, p2);
-    if (msg) { $('#set-err').textContent = msg; return; }
-    btn.disabled = true; btn.textContent = '正在重新加密…';
+    btn.disabled = true; btn.textContent = '正在验证…';
     try {
+      const old = await needOld('#set-old', '#set-chg-err'); if (!old) return;
+      const p1 = $('#set-new').value, p2 = $('#set-new2').value;
+      const msg = checkNewPw(p1, p2);
+      if (msg) { $('#set-chg-err').textContent = msg; return; }
+      btn.textContent = '正在重新加密…';
       const rotate = $('#set-rotate').checked;
       await rekey(p1, rotate);
       dset.close();
       toast('主密码已修改，记得点“未同步”导出同步包');
       if (rotate) showKit(true);
-    } finally { btn.disabled = false; btn.textContent = '修改'; }
+    } finally { btn.disabled = false; btn.textContent = '修改主密码'; }
   });
-  $('#set-export').addEventListener('click', () => exportSync(false));
-  $('#set-backup').addEventListener('click', () => exportSync(true));
+  $('#set-export').addEventListener('click', async () => { await exportSync(false); paintSyncStatus(); });
+  $('#set-backup').addEventListener('click', async () => { await exportSync(true); paintSyncStatus(); });
   $('#set-import').addEventListener('change', (e) => { dset.close(); if (e.target.files[0]) importFile(e.target.files[0]); e.target.value = ''; });
   $('#set-reload').addEventListener('click', async () => {
+    $('#set-sync-err').textContent = '';
     const r = await fetchRemote();
-    if (!r) { $('#set-err').textContent = 'GitHub 上还没有 vault.json'; return; }
+    if (!r) { $('#set-sync-err').textContent = 'GitHub 上还没有 vault.json'; return; }
     if (!(await ask('改用 GitHub 上的版本？', '这台设备上未导出的更改会被丢弃。', '确定'))) return;
     S.env = r; await setLocal('envelope', r); await setLocal('dirty', false);
     dset.close();
     lock('已加载 GitHub 上的版本，请解锁');
   });
-
   // ================= 启动 =================
   (async () => {
     applyTheme(getTheme());
